@@ -1,0 +1,10 @@
+build/
+ckpts/
+mmcv.egg-info/
+
+__pycache__/
+*.pyc
+*.pyo
+
+*.so
+
