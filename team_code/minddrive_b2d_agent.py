@@ -30,6 +30,8 @@ from pyquaternion import Quaternion
 from scipy.optimize import fsolve
 SAVE_PATH = os.environ.get('SAVE_PATH', None)
 IS_BENCH2DRIVE = os.environ.get('IS_BENCH2DRIVE', None)
+BASE_CAMERA_WIDTH = 1600
+BASE_CAMERA_HEIGHT = 900
 
 def get_entry_point():
     return 'MinddriveAgent'
@@ -56,6 +58,12 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         self.step = -1
         self.wall_start = time.time()
         self.initialized = False
+        self.camera_width = int(os.environ.get('MINDDRIVE_CAMERA_WIDTH', str(BASE_CAMERA_WIDTH)))
+        self.camera_height = int(os.environ.get('MINDDRIVE_CAMERA_HEIGHT', str(BASE_CAMERA_HEIGHT)))
+        self.enable_latency_benchmark = os.environ.get('MINDDRIVE_ENABLE_LATENCY', '0') == '1'
+        self.keep_jpeg_roundtrip = os.environ.get('MINDDRIVE_KEEP_JPEG_ROUNDTRIP', '1') == '1'
+        self.latency_warmup_steps = int(os.environ.get('MINDDRIVE_LATENCY_WARMUP_STEPS', '20'))
+        self.latency_records = OrderedDict()
         if not (hasattr(self, 'model') and self.model is not None and 
                 hasattr(self, 'inference_only_pipeline') and self.inference_only_pipeline is not None):
             cfg = Config.fromfile(self.config_path)
@@ -175,6 +183,65 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         self.coor2topdown = unreal2cam @ topdown_extrinsics
         topdown_intrinsics = np.array([[548.993771650447, 0.0, 256.0, 0], [0.0, 548.993771650447, 256.0, 0], [0.0, 0.0, 1.0, 0], [0, 0, 0, 1.0]])
         self.coor2topdown = topdown_intrinsics @ self.coor2topdown
+        self._scale_lidar2img_for_resolution()
+
+    def _scale_lidar2img_for_resolution(self):
+        sx = self.camera_width / BASE_CAMERA_WIDTH
+        sy = self.camera_height / BASE_CAMERA_HEIGHT
+        if abs(sx - 1.0) < 1e-8 and abs(sy - 1.0) < 1e-8:
+            return
+        for cam, matrix in self.lidar2img.items():
+            scaled = matrix.copy()
+            scaled[0, :] *= sx
+            scaled[1, :] *= sy
+            self.lidar2img[cam] = scaled
+
+    def _cuda_sync(self):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _latency_summary(self):
+        if not self.latency_records:
+            return {}
+        metrics = ['tick_ms', 'prepare_ms', 'pre_ms', 'model_ms', 'post_ms', 'e2e_ms']
+        effective_records = [
+            item for step, item in self.latency_records.items()
+            if step >= self.latency_warmup_steps
+        ]
+        summary = {
+            'camera_width': self.camera_width,
+            'camera_height': self.camera_height,
+            'keep_jpeg_roundtrip': self.keep_jpeg_roundtrip,
+            'warmup_steps': self.latency_warmup_steps,
+            'count_total': len(self.latency_records),
+            'count_effective': len(effective_records),
+        }
+        for metric in metrics:
+            values = [item[metric] for item in effective_records]
+            if not values:
+                summary[metric] = {}
+                continue
+            values_np = np.array(values, dtype=np.float64)
+            summary[metric] = {
+                'mean': float(values_np.mean()),
+                'std': float(values_np.std()),
+                'p50': float(np.percentile(values_np, 50)),
+                'p90': float(np.percentile(values_np, 90)),
+                'p95': float(np.percentile(values_np, 95)),
+                'p99': float(np.percentile(values_np, 99)),
+                'max': float(values_np.max()),
+            }
+        return summary
+
+    def _write_latency_files(self):
+        if self.save_path is None or not self.enable_latency_benchmark:
+            return
+        records_path = self.save_path / 'latency_records.json'
+        summary_path = self.save_path / 'latency_summary.json'
+        with open(records_path, 'w') as outfile:
+            json.dump(self.latency_records, outfile, indent=2)
+        with open(summary_path, 'w') as outfile:
+            json.dump(self._latency_summary(), outfile, indent=2)
 
     def _init(self):
         try:
@@ -200,48 +267,50 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
   
 
     def sensors(self):
+        camera_width = getattr(self, 'camera_width', BASE_CAMERA_WIDTH)
+        camera_height = getattr(self, 'camera_height', BASE_CAMERA_HEIGHT)
         sensors =[
                 # camera rgb
                 {
                     'type': 'sensor.camera.rgb',
                     'x': 0.80, 'y': 0.0, 'z': 1.60,
                     'roll': 0.0, 'pitch': 0.0, 'yaw': 0.0,
-                    'width': 1600, 'height': 900, 'fov': 70,
+                    'width': camera_width, 'height': camera_height, 'fov': 70,
                     'id': 'CAM_FRONT'
                 },
                 {
                     'type': 'sensor.camera.rgb',
                     'x': 0.27, 'y': -0.55, 'z': 1.60,
                     'roll': 0.0, 'pitch': 0.0, 'yaw': -55.0,
-                    'width': 1600, 'height': 900, 'fov': 70,
+                    'width': camera_width, 'height': camera_height, 'fov': 70,
                     'id': 'CAM_FRONT_LEFT'
                 },
                 {
                     'type': 'sensor.camera.rgb',
                     'x': 0.27, 'y': 0.55, 'z': 1.60,
                     'roll': 0.0, 'pitch': 0.0, 'yaw': 55.0,
-                    'width': 1600, 'height': 900, 'fov': 70,
+                    'width': camera_width, 'height': camera_height, 'fov': 70,
                     'id': 'CAM_FRONT_RIGHT'
                 },
                 {
                     'type': 'sensor.camera.rgb',
                     'x': -2.0, 'y': 0.0, 'z': 1.60,
                     'roll': 0.0, 'pitch': 0.0, 'yaw': 180.0,
-                    'width': 1600, 'height': 900, 'fov': 110,
+                    'width': camera_width, 'height': camera_height, 'fov': 110,
                     'id': 'CAM_BACK'
                 },
                 {
                     'type': 'sensor.camera.rgb',
                     'x': -0.32, 'y': -0.55, 'z': 1.60,
                     'roll': 0.0, 'pitch': 0.0, 'yaw': -110.0,
-                    'width': 1600, 'height': 900, 'fov': 70,
+                    'width': camera_width, 'height': camera_height, 'fov': 70,
                     'id': 'CAM_BACK_LEFT'
                 },
                 {
                     'type': 'sensor.camera.rgb',
                     'x': -0.32, 'y': 0.55, 'z': 1.60,
                     'roll': 0.0, 'pitch': 0.0, 'yaw': 110.0,
-                    'width': 1600, 'height': 900, 'fov': 70,
+                    'width': camera_width, 'height': camera_height, 'fov': 70,
                     'id': 'CAM_BACK_RIGHT'
                 },
                 # imu
@@ -285,8 +354,9 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         for cam in ['CAM_FRONT','CAM_FRONT_LEFT','CAM_FRONT_RIGHT','CAM_BACK','CAM_BACK_LEFT','CAM_BACK_RIGHT']:
             # img = cv2.cvtColor(input_data[cam][1][:, :, :3], cv2.COLOR_BGR2RGB)
             img = input_data[cam][1][:, :, :3]
-            _, img = cv2.imencode('.jpg', img, encode_param)
-            img = cv2.imdecode(img, cv2.IMREAD_COLOR)
+            if self.keep_jpeg_roundtrip:
+                _, img = cv2.imencode('.jpg', img, encode_param)
+                img = cv2.imdecode(img, cv2.IMREAD_COLOR)
             imgs[cam] = img
         
         #NOTE@Jianfeng: we directly use BGR image and let pipeline do the convert
@@ -327,9 +397,11 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
     
     @torch.no_grad()
     def run_step(self, input_data, timestamp):
+        step_start = time.perf_counter()
         if not self.initialized:
             self._init()
         tick_data = self.tick(input_data)
+        tick_end = time.perf_counter()
         results = {}
         results['lidar2img'] = []
         results['lidar2cam'] = []
@@ -402,9 +474,12 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
                     for k in range(len(data[0][i])):
                         # print(data[0][i][k])
                         data[0][i][k] = data[0][i][k].to(self.device)
-                    
+        self._cuda_sync()
+        model_start = time.perf_counter()
         custom_wrap_fp16_model(self.model)
         output_data_batch = self.model(input_data_batch, return_loss=False)
+        self._cuda_sync()
+        model_end = time.perf_counter()
         out_truck = output_data_batch[0]['pts_bbox']['ego_fut_preds'].cpu().numpy()
         out_truck_path = output_data_batch[0]['pts_bbox']['pw_ego_fut_pred'].cpu().numpy()
         steer_traj, throttle_traj, brake_traj, metadata_traj = self.pidcontroller.control_pid(out_truck_path,out_truck, tick_data['speed'], local_command_xy)
@@ -430,9 +505,21 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         self.pid_metadata['local_command_xy '] = local_command_xy.tolist()
         metric_info = self.get_metric_info()
         self.metric_info[self.step] = metric_info     
+        step_end = time.perf_counter()
         if SAVE_PATH is not None and self.step % 10 == 0:
             result_vis = output_data_batch[0]['pts_bbox'].get('result_vis', None)
             self.save(tick_data, result_vis)
+        if self.enable_latency_benchmark:
+            self.latency_records[self.step] = {
+                'tick_ms': round((tick_end - step_start) * 1000.0, 3),
+                'prepare_ms': round((model_start - tick_end) * 1000.0, 3),
+                'pre_ms': round((model_start - step_start) * 1000.0, 3),
+                'model_ms': round((model_end - model_start) * 1000.0, 3),
+                'post_ms': round((step_end - model_end) * 1000.0, 3),
+                'e2e_ms': round((step_end - step_start) * 1000.0, 3),
+            }
+            if self.save_path is not None and self.step % 10 == 0:
+                self._write_latency_files()
         self.prev_control = control
         return control
 
@@ -454,6 +541,8 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         outfile = open(self.save_path / 'metric_info.json', 'w')
         json.dump(self.metric_info, outfile, indent=4)
         outfile.close()
+        if self.enable_latency_benchmark:
+            self._write_latency_files()
         
         if result_vis is not None:
             img_to_show = result_vis['img_to_show']
@@ -479,6 +568,8 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
             cv2.imwrite(f"{save_dir}/{'%04d.png' % frame}", img)
 
     def destroy(self):
+        if self.enable_latency_benchmark:
+            self._write_latency_files()
         del self.model
         torch.cuda.empty_cache()
 

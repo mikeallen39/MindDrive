@@ -1,76 +1,79 @@
-# MindDrive Latency Benchmark Notes
+# MindDrive Latency Benchmark
 
 ## Goal
 
-If the target metric is **latency** rather than driving score / success rate, then the default Bench2Drive closed-loop benchmark is not sufficient by itself.
+This document describes the latency-oriented benchmark path added on top of the
+original MindDrive Bench2Drive evaluation.
 
-Bench2Drive mainly reports:
+Target requirement:
 
-- Driving Score
-- Success Rate
-- Ability metrics
-- Efficiency / smoothness
+- use **latency** as the primary metric
+- use camera resolution **1280 x 704**
+- keep the original closed-loop benchmark path available
 
-It does **not** directly define a latency benchmark protocol for MindDrive.
+The default MindDrive benchmark still focuses on driving score and success rate.
+The latency path adds timing instrumentation and a dedicated launcher without
+replacing the original flow.
 
-If the requirement is:
+## Implemented Changes
 
-- use **latency** as the main metric
-- use image resolution **1280 x 704**
+The latency adaptation is implemented in these files:
 
-then a separate latency measurement protocol should be defined on top of the current evaluation pipeline.
+- `team_code/minddrive_b2d_agent.py`
+- `adzoo/minddrive/configs/minddrive_qwen2_05B_latency.py`
+- `scripts/run_minddrive_05b_benchmark.sh`
+- `scripts/run_minddrive_05b_latency.sh`
 
-## Recommended Latency Protocol
+### 1. Resolution control
 
-There are two reasonable latency definitions.
+The agent now supports environment-driven camera resolution:
 
-### 1. System Latency
+- `MINDDRIVE_CAMERA_WIDTH`
+- `MINDDRIVE_CAMERA_HEIGHT`
 
-Measure the full time from agent input to final control output.
+Default values remain the original:
 
-Recommended measurement boundary:
+- width `1600`
+- height `900`
 
-- start: entering `run_step(self, input_data, timestamp)`
-- end: right before `return control`
+Latency mode sets:
 
-This measures:
+- width `1280`
+- height `704`
 
-- sensor data handling
-- image preprocessing
-- pipeline / collate
-- GPU transfer
-- model forward
-- PID / control postprocess
+### 2. Latency instrumentation
 
-This is the best choice if the target is **deployment-facing end-to-end latency**.
+The agent records per-step latency in `run_step()` with the following metrics:
 
-### 2. Model Latency
+- `tick_ms`
+- `prepare_ms`
+- `pre_ms`
+- `model_ms`
+- `post_ms`
+- `e2e_ms`
 
-Measure only the model forward path.
+The timing boundaries are:
 
-Recommended measurement boundary:
+- `tick_ms`: sensor extraction and `tick(input_data)`
+- `prepare_ms`: pipeline, collation, and tensor movement before model forward
+- `pre_ms`: total time before model forward
+- `model_ms`: `self.model(...)` only
+- `post_ms`: PID and control generation after model forward
+- `e2e_ms`: full step latency from entering `run_step()` to control ready
 
-- start: immediately before `self.model(...)`
-- end: immediately after `self.model(...)`
+### 3. Latency outputs
 
-This excludes:
+When `MINDDRIVE_ENABLE_LATENCY=1`, the agent writes:
 
-- sensor packing
-- JPEG encode/decode
-- mmcv pipeline overhead
-- host/device staging
-- PID controller
+- `latency_records.json`
+- `latency_summary.json`
 
-This is the best choice if the target is **pure inference speed**.
+These files are written under `SAVE_PATH`, which in latency mode defaults to:
 
-## Suggested Metrics
+- `Bench2Drive/eval_minddrive_05b_latency_1280x704/`
 
-For either protocol, record at least:
+The summary includes:
 
-- `latency_e2e_ms`
-- `latency_pre_ms`
-- `latency_model_ms`
-- `latency_post_ms`
 - `mean`
 - `std`
 - `p50`
@@ -78,176 +81,162 @@ For either protocol, record at least:
 - `p95`
 - `p99`
 - `max`
+- total/effective sample counts
+- warmup configuration
+- camera resolution
 
-Also recommend:
+### 4. 1280x704 config
 
-- ignore warmup frames, e.g. first 20 frames
-- report total sample count
-- report hardware and software environment
-- report whether CARLA render startup time is excluded
+The dedicated latency config is:
 
-## Where To Instrument
+- `adzoo/minddrive/configs/minddrive_qwen2_05B_latency.py`
 
-The main entry point is:
-
-- `MindDrive/team_code/minddrive_b2d_agent.py`
-
-Relevant functions:
-
-- `sensors()`
-- `tick()`
-- `run_step()`
-
-Recommended timing split inside `run_step()`:
-
-1. `tick(input_data)` and result packing
-2. `self.inference_only_pipeline(results)`
-3. batch collation and `.to(self.device)`
-4. `self.model(...)`
-5. PID controller and control generation
-
-## Resolution 1280 x 704
-
-To switch from the current `1600 x 900` setup to `1280 x 704`, changing only one place is not enough.
-
-At least the following parts must be updated consistently.
-
-### 1. Camera sensor resolution
-
-File:
-
-- `MindDrive/team_code/minddrive_b2d_agent.py`
-
-Current camera sensors are defined as:
-
-- width `1600`
-- height `900`
-
-These should be changed to:
-
-- width `1280`
-- height `704`
-
-### 2. Config-side raw image geometry
-
-File:
-
-- `MindDrive/adzoo/minddrive/configs/minddrive_qwen2_05B_infer.py`
-
-Current values:
-
-- `ida_aug_conf["H"] = 900`
-- `ida_aug_conf["W"] = 1600`
-
-These should be changed to:
+It overrides:
 
 - `ida_aug_conf["H"] = 704`
 - `ida_aug_conf["W"] = 1280`
 
-Note:
+It keeps:
 
-- `final_dim` in the config is currently `(320, 640)`
-- if this is kept unchanged, the input sensor resolution changes, but the final resized tensor shape remains the same
-- this may reduce preprocessing cost but does not necessarily reduce model compute proportionally
+- `final_dim = (320, 640)`
 
-### 3. Camera projection / intrinsic consistency
+This means the raw sensor input is now `1280x704`, while the final tensor shape
+fed into the model is still unchanged. This is deliberate, because it avoids
+changing model tensor assumptions while still letting the benchmark reflect the
+new capture resolution.
 
-File:
+### 5. Projection matrix handling
 
-- `MindDrive/team_code/minddrive_b2d_agent.py`
+The agent applies a simple width/height ratio scaling to the pixel-space rows of
+`lidar2img` when the camera resolution changes.
 
-The agent currently contains hard-coded matrices:
+This is a pragmatic adaptation for benchmark continuity, not a full intrinsic
+recalibration. It is sufficient for a latency benchmark, but it should not be
+treated as a rigorous camera re-calibration procedure.
 
-- `lidar2img`
-- `lidar2cam`
+## Two Latency Modes
 
-These values are written for the current camera setting and image geometry.
+There are two useful measurement definitions.
 
-If the sensor resolution is changed to `1280 x 704` but these matrices are left unchanged, projection consistency may break.
+### Mode A: system latency
 
-At minimum, the image-plane dependent parts of `lidar2img` should be re-derived or rescaled consistently.
+Measure the full online stack from `run_step()` entry to final control output.
 
-## Important Caveat About Current Preprocessing
+This includes:
 
-Inside `tick()` the code currently does this for each RGB camera:
+- sensor unpacking
+- JPEG roundtrip in `tick()` if enabled
+- mmcv preprocessing
+- batch collation
+- GPU transfer
+- model forward
+- PID controller
 
-- `cv2.imencode('.jpg', img, ...)`
-- `cv2.imdecode(...)`
+This is the best choice for deployment-facing end-to-end latency.
 
-This adds artificial CPU preprocessing overhead.
+### Mode B: model-oriented latency
 
-Therefore, before measuring latency, you must decide what exactly you want to measure.
+If you want the benchmark to focus more on model inference and less on CPU image
+packing overhead, disable the JPEG roundtrip:
 
-### If the target is system latency
+- `MINDDRIVE_KEEP_JPEG_ROUNDTRIP=0`
 
-Keep this behavior.
+This keeps the same benchmark path, but removes the extra JPEG encode/decode
+inside `tick()`.
 
-Reason:
+## Default Behavior
 
-- it reflects the current actual agent path
+The dedicated launcher defaults to:
 
-### If the target is model latency
+- `MINDDRIVE_ENABLE_LATENCY=1`
+- `MINDDRIVE_CAMERA_WIDTH=1280`
+- `MINDDRIVE_CAMERA_HEIGHT=704`
+- `MINDDRIVE_LATENCY_WARMUP_STEPS=20`
+- `MINDDRIVE_KEEP_JPEG_ROUNDTRIP=1`
 
-Remove or bypass this JPEG encode/decode step.
+So the default latency script currently measures **system latency** at
+`1280x704`.
 
-Reason:
+## How To Run
 
-- otherwise the reported latency is dominated by preprocessing noise instead of model inference
+### Default command
 
-## Recommended Reporting Modes
+Run the latency benchmark with:
 
-### Mode A: System Latency Benchmark
+```bash
+/mnt/42_store/zxz/HUAWEI/VLA/MindDrive/scripts/run_minddrive_05b_latency.sh \
+  2 \
+  leaderboard/data/drivetransformer_bench2drive_dev10 \
+  30000 \
+  50000 \
+  3
+```
 
-Keep the current agent logic intact and report:
+Arguments:
 
-- end-to-end per-frame latency
-- latency distribution after warmup
-- resolution `1280 x 704`
+1. model GPU id
+2. route basename
+3. CARLA port
+4. traffic manager port
+5. CARLA adapter id
 
-Use this if the question is:
+### Pure inference oriented run
 
-- "How long does the whole online driving stack take per step?"
+If you want to reduce preprocessing noise:
 
-### Mode B: Model Latency Benchmark
+```bash
+export MINDDRIVE_KEEP_JPEG_ROUNDTRIP=0
+/mnt/42_store/zxz/HUAWEI/VLA/MindDrive/scripts/run_minddrive_05b_latency.sh \
+  2 \
+  leaderboard/data/drivetransformer_bench2drive_dev10 \
+  30000 \
+  50000 \
+  3
+```
 
-Bypass JPEG encode/decode and measure only model forward.
+### Warmup control
 
-Use this if the question is:
+To change the number of ignored warmup frames:
 
-- "How fast is MindDrive inference itself?"
+```bash
+export MINDDRIVE_LATENCY_WARMUP_STEPS=50
+```
 
-## Practical Recommendation
+## Outputs To Check
 
-For serious comparison, report both:
+After a run, check:
+
+- benchmark result json under `minddrive_05b_latency_results/`
+- latency records under `Bench2Drive/eval_minddrive_05b_latency_1280x704/`
+
+The main latency summary file is:
+
+- `Bench2Drive/eval_minddrive_05b_latency_1280x704/latency_summary.json`
+
+## Recommended Reporting
+
+If the target is a serious latency comparison, report both:
 
 - `system latency @ 1280x704`
-- `model latency @ 1280x704`
+- `reduced-preprocess latency @ 1280x704`
 
-This avoids mixing:
+At minimum include:
 
-- deployment overhead
-- preprocessing overhead
-- actual neural inference cost
+- GPU model
+- CUDA / driver environment
+- whether CARLA rendering startup is excluded
+- warmup count
+- whether JPEG roundtrip is enabled
+- `mean`, `p50`, `p90`, `p95`, `p99`, `max`
 
-## Implementation Recommendation
+## Validation Status
 
-The cleanest next step is:
+The current latency path has been smoke-checked for:
 
-1. modify sensor resolution to `1280 x 704`
-2. update config `H/W`
-3. verify / adjust projection matrices
-4. add latency logging in `run_step()`
-5. output per-frame latency JSON
-6. output summary statistics at the end
+- shell syntax of both launcher scripts
+- config import
+- agent import under the project environment
 
-## Scope Clarification
-
-Changing the input resolution to `1280 x 704` does **not** automatically make the benchmark a latency benchmark.
-
-A latency benchmark needs:
-
-- explicit timing boundaries
-- explicit warmup policy
-- explicit reporting statistics
-- explicit statement of whether preprocessing is included
-
+It has not yet been reworked into a standalone offline microbenchmark. The
+current path is still based on the Bench2Drive closed-loop evaluation loop, with
+latency collection added on top.
