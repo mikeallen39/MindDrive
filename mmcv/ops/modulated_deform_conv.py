@@ -8,7 +8,7 @@ from torch.autograd.function import once_differentiable
 from torch.nn.modules.utils import _pair, _single
 
 from mmcv.utils import deprecated_api_warning
-from ..models import CONV_LAYERS
+from ..models.bricks.registry import CONV_LAYERS
 from ..utils import ext_loader, print_log
 
 ext_module = ext_loader.load_ext(

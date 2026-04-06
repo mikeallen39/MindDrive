@@ -13,7 +13,7 @@ import warnings
 import torch.utils.checkpoint as cp
 from transformers import CLIPImageProcessor
 
-from ..utils.attention import FlashAttention, FlashMHA
+from ..utils.attention import FlashAttention, FlashMHA, FLASH_ATTN_AVAILABLE
 from mmcv.models.builder import BACKBONES
 
 logger = logging.getLogger(__name__)
@@ -651,7 +651,7 @@ class Attention(nn.Module):
             self.v_bias = None
 
         self.rope = rope
-        self.flash_attn = flash_attn
+        self.flash_attn = flash_attn and FLASH_ATTN_AVAILABLE and torch.cuda.is_available()
         self.proj = nn.Linear(all_head_dim, dim)
         self.inner_attn_ln = norm_layer(all_head_dim) if subln else nn.Identity()
 

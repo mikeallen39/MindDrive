@@ -121,13 +121,28 @@ class PredictModel(nn.Module):
         self.linear2 = nn.Linear(hidden_channels*2, hidden_channels*4)
         self.linear3 = nn.Linear(hidden_channels*4, out_channels)
         self.relu = nn.ReLU(inplace=True)
+        self._npu_fp16_prepared = False
+
+    def _prepare_npu_fp16(self):
+        if self._npu_fp16_prepared:
+            return
+        self.gru.half()
+        self.linear1.half()
+        self.linear2.half()
+        self.linear3.half()
+        self._npu_fp16_prepared = True
 
     def forward(self, x , h):
+        output_dtype = x.dtype
+        if x.device.type == 'npu':
+            self._prepare_npu_fp16()
+            x = x.half()
+            h = h.half()
         x, h = self.gru(x, h)
         x = self.relu(self.linear1(x))
         x = self.relu(self.linear2(x))
         x = self.linear3(x)
-        return x
+        return x.to(output_dtype)
 
 
 class PredictModelHidden(nn.Module):
@@ -140,13 +155,27 @@ class PredictModelHidden(nn.Module):
         self.linear2 = nn.Linear(hidden_channels*2, hidden_channels*4)
         self.linear3 = nn.Linear(hidden_channels*4, out_channels)
         self.relu = nn.ReLU(inplace=True)
+        self._npu_fp16_prepared = False
+
+    def _prepare_npu_fp16(self):
+        if self._npu_fp16_prepared:
+            return
+        self.gru.half()
+        self.linear1.half()
+        self.linear2.half()
+        self.linear3.half()
+        self._npu_fp16_prepared = True
 
     def forward(self, x):
+        output_dtype = x.dtype
+        if x.device.type == 'npu':
+            self._prepare_npu_fp16()
+            x = x.half()
         x, h = self.gru(x)
         x = self.relu(self.linear1(x))
         x = self.relu(self.linear2(x))
         x = self.linear3(x)
-        return x
+        return x.to(output_dtype)
 
 
 
@@ -173,7 +202,6 @@ class ProbabilisticLoss(nn.Module):
         kl_loss = torch.mean(torch.sum(kl_div, dim=-1)) * self.loss_weight
 
         return kl_loss
-
 
 
 

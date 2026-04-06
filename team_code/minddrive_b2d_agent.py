@@ -7,18 +7,18 @@ import json
 import datetime
 import pathlib
 import time
+import sys
 import cv2
 import carla
 from collections import deque
 import math
 from collections import OrderedDict
 import torch
-import carla
 import numpy as np
 from PIL import Image
 from torchvision import transforms as T
-from Bench2DriveZoo.team_code.pid_controller_de import PIDController
-from Bench2DriveZoo.team_code.planner import RoutePlanner
+from team_code.pid_controller_de import PIDController
+from team_code.planner import RoutePlanner
 from leaderboard.autoagents import autonomous_agent
 from mmcv import Config
 from mmcv.models import build_model 
@@ -32,6 +32,36 @@ SAVE_PATH = os.environ.get('SAVE_PATH', None)
 IS_BENCH2DRIVE = os.environ.get('IS_BENCH2DRIVE', None)
 BASE_CAMERA_WIDTH = 1600
 BASE_CAMERA_HEIGHT = 900
+
+try:
+    import torch_npu  # noqa: F401
+except ImportError:
+    torch_npu = None
+
+
+def _infer_device():
+    requested = os.environ.get('MINDDRIVE_DEVICE', 'auto').lower()
+    if requested != 'auto':
+        return requested
+    if hasattr(torch, 'npu') and torch.npu.is_available():
+        return 'npu'
+    if torch.cuda.is_available():
+        return 'cuda'
+    return 'cpu'
+
+
+def _device_sync(device):
+    if device == 'npu' and hasattr(torch, 'npu'):
+        torch.npu.synchronize()
+    elif device == 'cuda' and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _empty_device_cache(device):
+    if device == 'npu' and hasattr(torch, 'npu'):
+        torch.npu.empty_cache()
+    elif device == 'cuda' and torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 def get_entry_point():
     return 'MinddriveAgent'
@@ -58,6 +88,7 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         self.step = -1
         self.wall_start = time.time()
         self.initialized = False
+        self.device = _infer_device()
         self.camera_width = int(os.environ.get('MINDDRIVE_CAMERA_WIDTH', str(BASE_CAMERA_WIDTH)))
         self.camera_height = int(os.environ.get('MINDDRIVE_CAMERA_HEIGHT', str(BASE_CAMERA_HEIGHT)))
         self.enable_latency_benchmark = os.environ.get('MINDDRIVE_ENABLE_LATENCY', '0') == '1'
@@ -72,7 +103,6 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
                     import importlib
                     if hasattr(cfg, 'plugin_dir'):
                         plugin_dir = cfg.plugin_dir
-                        plugin_dir = os.path.join("Bench2DriveZoo", plugin_dir)
                         _module_dir = os.path.dirname(plugin_dir)
                         _module_dir = _module_dir.split('/')
                         _module_path = _module_dir[0]
@@ -83,7 +113,7 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
     
             self.model = build_model(cfg.model, train_cfg=cfg.get('train_cfg'), test_cfg=cfg.get('test_cfg'))
             checkpoint = load_checkpoint(self.model, self.ckpt_path, map_location='cpu')
-            self.model.cuda()
+            self.model.to(self.device)
             self.model.eval()
             self.inference_only_pipeline = []
             for inference_only_pipeline in cfg.inference_only_pipeline:
@@ -197,8 +227,7 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
             self.lidar2img[cam] = scaled
 
     def _cuda_sync(self):
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        _device_sync(self.device)
 
     def _latency_summary(self):
         if not self.latency_records:
@@ -463,7 +492,6 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         results['ori_shape'] = stacked_imgs.shape
         results['pad_shape'] = stacked_imgs.shape
         results = self.inference_only_pipeline(results)
-        self.device="cuda"
         input_data_batch = mm_collate_to_batch_form([results], samples_per_gpu=1)
         for key, data in input_data_batch.items():
             if key != 'img_metas':
@@ -476,7 +504,8 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
                         data[0][i][k] = data[0][i][k].to(self.device)
         self._cuda_sync()
         model_start = time.perf_counter()
-        custom_wrap_fp16_model(self.model)
+        if self.device != 'cpu':
+            custom_wrap_fp16_model(self.model)
         output_data_batch = self.model(input_data_batch, return_loss=False)
         self._cuda_sync()
         model_end = time.perf_counter()
@@ -571,7 +600,7 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         if self.enable_latency_benchmark:
             self._write_latency_files()
         del self.model
-        torch.cuda.empty_cache()
+        _empty_device_cache(self.device)
 
     def gps_to_location(self, gps):
         EARTH_RADIUS_EQUA = 6378137.0
@@ -622,5 +651,5 @@ def custom_wrap_fp16_model(model):
         
 if __name__=="__main__":
     agent = MinddriveAgent('localhost', 2000, 1)
-    agent.setup('Bench2DriveZoo/adzoo/Minddrive/configs/mask_eva_lane_det_vlm_b2d_fp16_infer.py+Bench2DriveZoo/ckpts/Minddrive.pth')
+    agent.setup('adzoo/minddrive/configs/minddrive_qwen2_05B_infer.py+ckpts/minddrive_rltrain.pth')
     agent.destroy()

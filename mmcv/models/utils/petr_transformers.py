@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
 import torch.utils.checkpoint as cp
-from .attention import FlashMHA
+from .attention import FlashMHA, FLASH_ATTN_AVAILABLE
 import warnings
 from mmcv.utils import force_fp32, auto_fp16
 
@@ -46,8 +46,8 @@ class MultiHeadAttentionwDropout(nn.Module):
         self._embed_dims = embed_dims
         self._num_heads = num_heads
         self._dropout = dropout
-        self.flash_attn = flash_attn
-        if flash_attn:
+        self.flash_attn = flash_attn and FLASH_ATTN_AVAILABLE and torch.cuda.is_available()
+        if self.flash_attn:
             self.attn = FlashMHA(embed_dims, num_heads, dropout, dtype=torch.float16, device='cuda')
         elif fp16:
             self.attn = MultiheadAttentionWrapper(embed_dims, num_heads, dropout=dropout, batch_first=True)

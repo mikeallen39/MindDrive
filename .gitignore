@@ -8,3 +8,11 @@ __pycache__/
 
 *.so
 
+# Runtime artifacts
+data/ChatB2D-plus.zip
+data/chat-B2D/
+logs/
+results_latency_offline_1280x704/
+results_latency_offline_1280x704_steps3/
+fusion_result.json
+ge_check_op.json

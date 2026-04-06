@@ -3,10 +3,11 @@
 # ------------------------------------------------------------------------
 #  Modified by Shihao Wang
 # ------------------------------------------------------------------------
-# flash-attention 
+# flash-attention
 import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.init import (
     xavier_uniform_,
     constant_,
@@ -16,11 +17,20 @@ from torch.nn.functional import linear
 
 from einops import rearrange
 from mmcv.utils import auto_fp16
-# for H20 flash-attn-2.7.0.post2 is ok
-from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
-# for A800/A100
-# from flash_attn.flash_attn_interface import flash_attn_unpadded_kvpacked_func
-from flash_attn.bert_padding import unpad_input, pad_input, index_first_axis
+
+try:
+    # for H20 flash-attn-2.7.0.post2 is ok
+    from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
+    # for A800/A100
+    # from flash_attn.flash_attn_interface import flash_attn_unpadded_kvpacked_func
+    from flash_attn.bert_padding import unpad_input, pad_input, index_first_axis
+    FLASH_ATTN_AVAILABLE = True
+except ImportError:
+    flash_attn_varlen_kvpacked_func = None
+    unpad_input = None
+    pad_input = None
+    index_first_axis = None
+    FLASH_ATTN_AVAILABLE = False
 
 
 def _in_projection_packed(q, k, v, w, b = None):
@@ -59,41 +69,97 @@ class FlashAttention(nn.Module):
             kv: The tensor containing the key, and value. (B, S, 2, H, D) 
             key_padding_mask: a bool tensor of shape (B, S)
         """
-        assert q.dtype in [torch.float16, torch.bfloat16] and kv.dtype in [torch.float16, torch.bfloat16]
-        assert q.is_cuda and kv.is_cuda
+        use_flash_attn = (
+            FLASH_ATTN_AVAILABLE
+            and q.dtype in [torch.float16, torch.bfloat16]
+            and kv.dtype in [torch.float16, torch.bfloat16]
+            and q.is_cuda
+            and kv.is_cuda
+        )
         assert q.shape[0] == kv.shape[0] and q.shape[-2] == kv.shape[-2] and q.shape[-1] == kv.shape[-1]
 
         batch_size = q.shape[0]
         seqlen_q, seqlen_k = q.shape[1], kv.shape[1]
-        if key_padding_mask is None:
-            q, kv = rearrange(q, 'b s ... -> (b s) ...'), rearrange(kv, 'b s ... -> (b s) ...')
-            max_sq, max_sk = seqlen_q, seqlen_k 
-            cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
-                                    device=q.device)
-            cu_seqlens_k = torch.arange(0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32,
-                                    device=kv.device)                    
-            output = flash_attn_varlen_kvpacked_func(
-                q, kv, cu_seqlens_q, cu_seqlens_k, max_sq, max_sk,
-                self.dropout_p if self.training else 0.0,
-                softmax_scale=self.softmax_scale, causal=causal
-            )
-            output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
-        else:
-            nheads = kv.shape[-2]
-            q = rearrange(q, 'b s ... -> (b s) ...')
-            max_sq = seqlen_q
-            cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32,
-                                    device=q.device)
-            x = rearrange(kv, 'b s two h d -> b s (two h d)')
-            x_unpad, indices, cu_seqlens_k, max_sk, _ = unpad_input(x, key_padding_mask)
-            x_unpad = rearrange(x_unpad, 'nnz (two h d) -> nnz two h d', two=2, h=nheads)
-            output_unpad = flash_attn_varlen_kvpacked_func(
-                q, x_unpad, cu_seqlens_q, cu_seqlens_k, max_sq, max_sk,
-                self.dropout_p if self.training else 0.0,
-                softmax_scale=self.softmax_scale, causal=causal
-            )
-            output = rearrange(output_unpad, '(b s) ... -> b s ...', b=batch_size)
+        if use_flash_attn:
+            if key_padding_mask is None:
+                q, kv = rearrange(q, 'b s ... -> (b s) ...'), rearrange(kv, 'b s ... -> (b s) ...')
+                max_sq, max_sk = seqlen_q, seqlen_k
+                cu_seqlens_q = torch.arange(
+                    0,
+                    (batch_size + 1) * seqlen_q,
+                    step=seqlen_q,
+                    dtype=torch.int32,
+                    device=q.device,
+                )
+                cu_seqlens_k = torch.arange(
+                    0,
+                    (batch_size + 1) * seqlen_k,
+                    step=seqlen_k,
+                    dtype=torch.int32,
+                    device=kv.device,
+                )
+                output = flash_attn_varlen_kvpacked_func(
+                    q,
+                    kv,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_sq,
+                    max_sk,
+                    self.dropout_p if self.training else 0.0,
+                    softmax_scale=self.softmax_scale,
+                    causal=causal,
+                )
+                output = rearrange(output, '(b s) ... -> b s ...', b=batch_size)
+            else:
+                nheads = kv.shape[-2]
+                q = rearrange(q, 'b s ... -> (b s) ...')
+                max_sq = seqlen_q
+                cu_seqlens_q = torch.arange(
+                    0,
+                    (batch_size + 1) * seqlen_q,
+                    step=seqlen_q,
+                    dtype=torch.int32,
+                    device=q.device,
+                )
+                x = rearrange(kv, 'b s two h d -> b s (two h d)')
+                x_unpad, indices, cu_seqlens_k, max_sk, _ = unpad_input(x, key_padding_mask)
+                x_unpad = rearrange(x_unpad, 'nnz (two h d) -> nnz two h d', two=2, h=nheads)
+                output_unpad = flash_attn_varlen_kvpacked_func(
+                    q,
+                    x_unpad,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_sq,
+                    max_sk,
+                    self.dropout_p if self.training else 0.0,
+                    softmax_scale=self.softmax_scale,
+                    causal=causal,
+                )
+                output = rearrange(output_unpad, '(b s) ... -> b s ...', b=batch_size)
+            return output, None
 
+        k = kv[:, :, 0]
+        v = kv[:, :, 1]
+        q = q.permute(0, 2, 1, 3)
+        k = k.permute(0, 2, 1, 3)
+        v = v.permute(0, 2, 1, 3)
+
+        scale = self.softmax_scale or (q.shape[-1] ** -0.5)
+        scores = torch.matmul(q, k.transpose(-1, -2)) * scale
+
+        if key_padding_mask is not None:
+            scores = scores.masked_fill(key_padding_mask[:, None, None, :].to(torch.bool), float('-inf'))
+        if causal:
+            causal_mask = torch.triu(
+                torch.ones(seqlen_q, seqlen_k, device=scores.device, dtype=torch.bool),
+                diagonal=1,
+            )
+            scores = scores.masked_fill(causal_mask[None, None, :, :], float('-inf'))
+
+        attn = torch.softmax(scores, dim=-1)
+        if self.training and self.dropout_p > 0.0:
+            attn = F.dropout(attn, p=self.dropout_p)
+        output = torch.matmul(attn, v).permute(0, 2, 1, 3)
         return output, None
 
 

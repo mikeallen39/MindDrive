@@ -1,4 +1,5 @@
 import glob
+import importlib.util
 import os
 import platform
 import re
@@ -155,6 +156,58 @@ def get_extensions():
             extension = CUDAExtension
             include_dirs.append(os.path.abspath('./mmcv/ops/csrc/common'))
             include_dirs.append(os.path.abspath('./mmcv/ops/csrc/common/cuda'))
+        elif os.getenv('FORCE_NPU', '0') == '1':
+            print(f'Compiling {ext_name} only with CPU and NPU')
+            from torch_npu.utils.cpp_extension import NpuExtension
+
+            define_macros += [('MMCV_WITH_NPU', None)]
+            if parse_version(torch.__version__) >= parse_version('2.1.0'):
+                define_macros += [('MMCV_WITH_KPRIVATE', None)]
+            else:
+                define_macros += [('MMCV_WITH_XLA', None)]
+
+            torch_npu_spec = importlib.util.find_spec('torch_npu')
+            if torch_npu_spec is None or not torch_npu_spec.submodule_search_locations:
+                raise ImportError('torch_npu is required when FORCE_NPU=1')
+
+            torch_npu_root = torch_npu_spec.submodule_search_locations[0]
+            extra_compile_args['cxx'] += [
+                '-D__FILENAME__=\"$$(notdir $$(abspath $$<))\"',
+                '-I' + os.path.join(torch_npu_root, 'include', 'third_party', 'acl', 'inc'),
+                '-I' + os.path.join(torch_npu_root, 'include', 'third_party', 'hccl', 'inc'),
+            ]
+
+            npu_op_files = [
+                './mmcv/ops/csrc/pytorch/npu/bbox_overlaps_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/box_iou_rotated_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/deform_roi_pool.cpp',
+                './mmcv/ops/csrc/pytorch/npu/focal_loss_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/furthest_point_sample_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/furthest_point_sampling_with_dist_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/fused_bias_leakyrelu_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/gather_points_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/group_points_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/knn_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/ms_deform_attn_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/nms3d_normal_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/nms3d_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/nms_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/nms_rotated_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/points_in_box_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/psa_mask_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/roi_align_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/roipoint_pool3d_forward.cpp',
+                './mmcv/ops/csrc/pytorch/npu/roi_pool_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/three_interpolate_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/three_nn_npu.cpp',
+                './mmcv/ops/csrc/pytorch/npu/voxelization_npu.cpp',
+            ]
+
+            op_files = glob.glob('./mmcv/ops/csrc/pytorch/*.cpp') + \
+                glob.glob('./mmcv/ops/csrc/pytorch/cpu/*.cpp') + \
+                npu_op_files
+            extension = NpuExtension
+            include_dirs.append(os.path.abspath('./mmcv/ops/csrc/common'))
         else:
             print(f'Compiling {ext_name} without CUDA')
             op_files = glob.glob('./mmcv/ops/csrc/pytorch/*.cpp') + \
@@ -178,6 +231,29 @@ def get_extensions():
 
     return extensions
 
+extra_ext_modules = []
+if os.getenv('FORCE_NPU', '0') != '1':
+    extra_ext_modules.extend([
+        make_cuda_ext(
+            name='iou3d_cuda',
+            module='mmcv.ops.iou3d_det',
+            sources=[
+                'src/iou3d.cpp',
+                'src/iou3d_kernel.cu',
+            ]),
+        make_cuda_ext(
+            name='roiaware_pool3d_ext',
+            module='mmcv.ops.roiaware_pool3d',
+            sources=[
+                'src/roiaware_pool3d.cpp',
+                'src/points_in_boxes_cpu.cpp',
+            ],
+            sources_cuda=[
+                'src/roiaware_pool3d_kernel.cu',
+                'src/points_in_boxes_cuda.cu',
+            ]),
+    ])
+
 setup(
     name='mmcv',
     version='0.0.1',
@@ -200,25 +276,6 @@ setup(
     author='MMCV Contributors',
     author_email='openmmlab@gmail.com',
     install_requires=parse_requirements(),
-    ext_modules= get_extensions() + [
-            make_cuda_ext(
-                name='iou3d_cuda',
-                module='mmcv.ops.iou3d_det',
-                sources=[
-                    'src/iou3d.cpp',
-                    'src/iou3d_kernel.cu',
-                ]),
-            make_cuda_ext(
-                name='roiaware_pool3d_ext',
-                module='mmcv.ops.roiaware_pool3d',
-                sources=[
-                    'src/roiaware_pool3d.cpp',
-                    'src/points_in_boxes_cpu.cpp',
-                ],
-                sources_cuda=[
-                    'src/roiaware_pool3d_kernel.cu',
-                    'src/points_in_boxes_cuda.cu',
-                ]),
-    ],
+    ext_modules=get_extensions() + extra_ext_modules,
     cmdclass=cmd_class,
     zip_safe=False)

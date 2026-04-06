@@ -37,11 +37,11 @@ def points_in_boxes_gpu(points, boxes):
     # as the device of the tensors if it was not.
     # Please refer to https://github.com/open-mmlab/mmdetection3d/issues/305
     # for the incorrect output before the fix.
-    points_device = points.get_device()
-    assert points_device == boxes.get_device(), \
+    points_device = points.device
+    assert points_device == boxes.device, \
         'Points and boxes should be put on the same device'
-    if torch.cuda.current_device() != points_device:
-        torch.cuda.set_device(points_device)
+    if points_device.type == 'cuda' and torch.cuda.current_device() != points_device.index:
+        torch.cuda.set_device(points_device.index)
 
     roiaware_pool3d_ext.points_in_boxes_gpu(boxes.contiguous(),
                                             points.contiguous(),
@@ -110,11 +110,11 @@ def points_in_boxes_batch(points, boxes):
                                        dtype=torch.int).fill_(0)
 
     # Same reason as line 25-32
-    points_device = points.get_device()
-    assert points_device == boxes.get_device(), \
+    points_device = points.device
+    assert points_device == boxes.device, \
         'Points and boxes should be put on the same device'
-    if torch.cuda.current_device() != points_device:
-        torch.cuda.set_device(points_device)
+    if points_device.type == 'cuda' and torch.cuda.current_device() != points_device.index:
+        torch.cuda.set_device(points_device.index)
 
     roiaware_pool3d_ext.points_in_boxes_batch(boxes.contiguous(),
                                               points.contiguous(),

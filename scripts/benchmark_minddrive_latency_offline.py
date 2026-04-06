@@ -1,22 +1,31 @@
 #!/usr/bin/env python
 
 import argparse
+import importlib.util
 import json
 import os
 import pathlib
+import sys
 import time
+import types
 from enum import IntEnum
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 
+try:
+    import torch_npu  # noqa: F401
+except ImportError:
+    torch_npu = None
 
-ROOT_DIR = pathlib.Path("/mnt/42_store/zxz/HUAWEI/VLA")
-BENCH_DIR = ROOT_DIR / "Bench2Drive"
-MINDDRIVE_DIR = ROOT_DIR / "MindDrive"
-DEFAULT_CONFIG = "Bench2DriveZoo/adzoo/minddrive/configs/minddrive_qwen2_05B_latency.py"
-DEFAULT_CKPT = "Bench2DriveZoo/ckpts/minddrive_rltrain.pth"
+
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+RL_PROJECTS_DIR = REPO_ROOT / "rl_projects"
+SCENARIO_RUNNER_DIR = RL_PROJECTS_DIR / "scenario_runner"
+CARLA_MOCKS_DIR = REPO_ROOT / "rl_projects" / "scenario_runner" / "srunner" / "tests" / "carla_mocks"
+DEFAULT_CONFIG = str(REPO_ROOT / "adzoo" / "minddrive" / "configs" / "minddrive_qwen2_05B_latency.py")
+DEFAULT_CKPT = str(REPO_ROOT / "ckpts" / "minddrive_rltrain.pth")
 CAM_NAMES = [
     "CAM_FRONT",
     "CAM_FRONT_LEFT",
@@ -31,6 +40,66 @@ class FakeRoadOption(IntEnum):
     LANEFOLLOW = 4
 
 
+def ensure_repo_imports():
+    for path in [str(REPO_ROOT), str(RL_PROJECTS_DIR), str(SCENARIO_RUNNER_DIR), str(CARLA_MOCKS_DIR)]:
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
+def ensure_carla_stub():
+    module = None
+    try:
+        import carla as module  # noqa: F401
+    except ImportError:
+        mock_path = CARLA_MOCKS_DIR / "carla.py"
+        if mock_path.exists():
+            spec = importlib.util.spec_from_file_location("carla", mock_path)
+            if spec is not None and spec.loader is not None:
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+        if module is None:
+            module = types.ModuleType("carla")
+    if not hasattr(module, "VehicleControl"):
+        class VehicleControl:
+            def __init__(self):
+                self.steer = 0.0
+                self.throttle = 0.0
+                self.brake = 0.0
+
+        module.VehicleControl = VehicleControl
+    sys.modules["carla"] = module
+
+
+def infer_device():
+    requested = os.environ.get("MINDDRIVE_DEVICE", "auto").lower()
+    if requested != "auto":
+        return requested
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return "npu"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def device_sync(device):
+    if device == "npu" and hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    elif device == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def device_info(device):
+    info = {"device": device}
+    if device == "npu" and hasattr(torch, "npu"):
+        info["device_count"] = torch.npu.device_count()
+        info["visible_devices"] = os.environ.get("NPU-VISIBLE-DEVICES", "")
+    elif device == "cuda" and torch.cuda.is_available():
+        info["device_count"] = torch.cuda.device_count()
+        info["visible_devices"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+        info["device_name"] = torch.cuda.get_device_name(0)
+    return info
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Offline latency benchmark for MindDrive 0.5B")
     parser.add_argument("--config", default=DEFAULT_CONFIG)
@@ -42,7 +111,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--output-dir",
-        default=str(MINDDRIVE_DIR / "results_latency_offline_1280x704"),
+        default=str(REPO_ROOT / "results_latency_offline_1280x704"),
     )
     return parser.parse_args()
 
@@ -72,10 +141,10 @@ def patch_agent_bootstrap():
 
 
 def make_global_plan(lat_ref=42.0, lon_ref=2.0, num_points=8, delta_lon=1e-5):
-    plan = []
-    for idx in range(num_points):
-        plan.append(({"lat": lat_ref, "lon": lon_ref + idx * delta_lon}, FakeRoadOption.LANEFOLLOW))
-    return plan
+    return [
+        ({"lat": lat_ref, "lon": lon_ref + idx * delta_lon}, FakeRoadOption.LANEFOLLOW)
+        for idx in range(num_points)
+    ]
 
 
 def make_static_input(width, height, seed):
@@ -131,29 +200,29 @@ def run_mode(mode_name, config_path, ckpt_path, width, height, steps, warmup_ste
         keep_jpeg_roundtrip=keep_jpeg_roundtrip,
     )
     input_data = make_static_input(width=width, height=height, seed=seed)
+    device = infer_device()
 
     wall_start = time.perf_counter()
     for step in range(steps):
         agent.run_step(input_data, step / 20.0)
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
+        device_sync(device)
     wall_end = time.perf_counter()
 
     summary = agent._latency_summary()
     summary["mode"] = mode_name
     summary["steps_requested"] = steps
     summary["wall_total_s"] = round(wall_end - wall_start, 3)
-    if torch.cuda.is_available():
-        summary["cuda_visible_devices"] = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-        summary["gpu_name"] = torch.cuda.get_device_name(0)
+    summary.update(device_info(device))
     agent.destroy()
     return summary, agent.latency_records
 
 
 def main():
     args = parse_args()
+    ensure_repo_imports()
+    ensure_carla_stub()
     torch.set_grad_enabled(False)
-    os.chdir(BENCH_DIR)
+    os.chdir(REPO_ROOT)
 
     output_dir = pathlib.Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

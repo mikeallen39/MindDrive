@@ -1,5 +1,9 @@
 _base_ = ["../_base_/datasets/nus-3d.py",
           "../_base_/default_runtime.py"]
+REPO_ROOT = __import__('os').environ.get(
+    'MINDDRIVE_ROOT',
+    __import__('os').getcwd(),
+)
 backbone_norm_cfg = dict(type='LN', requires_grad=True)
 
 # plugin=True
@@ -165,7 +169,7 @@ num_gpus = 32
 batch_size = 32
 num_iters_per_epoch = 234769 // (num_gpus * batch_size)
 num_epochs = 10
-llm_path = './Bench2DriveZoo/ckpts/llava-qwen2-0.5b'
+llm_path = REPO_ROOT + '/ckpts/llava-qwen2-0.5b'
 
 use_gen_token = True
 collect_keys = ['lidar2img', 'cam_intrinsic', 'timestamp', 'ego_pose', 'ego_pose_inv', 'command']

@@ -17,8 +17,6 @@ from torch.nn.init import normal_
 
 from mmcv.models.utils.builder import TRANSFORMER
 
-from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttention
-
 try:
     from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttention
 

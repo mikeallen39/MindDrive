@@ -421,10 +421,11 @@ class BaseInstance3DBoxes(object):
         boxes2_bev = xywhr2xyxyr(boxes2.bev)
 
         # bev overlap
+        bev_device = boxes1_bev.device
         overlaps_bev = boxes1_bev.new_zeros(
-            (boxes1_bev.shape[0], boxes2_bev.shape[0])).cuda()  # (N, M)
-        iou3d_cuda.boxes_overlap_bev_gpu(boxes1_bev.contiguous().cuda(),
-                                         boxes2_bev.contiguous().cuda(),
+            (boxes1_bev.shape[0], boxes2_bev.shape[0]))  # (N, M)
+        iou3d_cuda.boxes_overlap_bev_gpu(boxes1_bev.contiguous().to(bev_device),
+                                         boxes2_bev.contiguous().to(bev_device),
                                          overlaps_bev)
 
         # 3d overlaps
