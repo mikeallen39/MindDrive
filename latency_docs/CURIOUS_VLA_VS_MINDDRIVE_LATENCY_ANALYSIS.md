@@ -71,9 +71,78 @@
 - [README.md](/home/ma-user/MindDrive/README.md#L27)
 - [README.md](/home/ma-user/MindDrive/README.md#L65)
 
-## 4. 最关键的区别：推理范式不同
+## 4. 从论文本身看，两者关注点也不同
 
-### 4.1 MindDrive 更接近“单次前向直接出轨迹”
+这里先说明一下本节的信息来源：
+
+- `MindDrive`：本次补充基于 arXiv HTML 正文、项目 README 和代码实现
+- `Curious-VLA`：在不继续下载 PDF 的前提下，本次补充主要基于 arXiv 摘要、项目 README 和当前仓库实现
+
+因此：
+
+- 关于 `MindDrive` 的归纳更接近“论文正文级确认”
+- 关于 `Curious-VLA` 的归纳更接近“摘要 + 代码实现一致性分析”
+
+### 4.1 MindDrive 论文更强调“把连续动作问题转成语言决策问题”
+
+从 `MindDrive` 论文与 README 的表述看，它的核心思想是：
+
+- 用一个 Decision Expert 做场景理解与离散语言决策
+- 用一个 Action Expert 把语言决策映射到可行轨迹
+- 再把轨迹级奖励反馈回语言决策空间
+
+这意味着它在方法设计上就倾向于：
+
+- 把困难的连续动作探索，转到更紧凑的有限语言决策空间里
+
+这件事对 latency 的启发是：
+
+- 在线执行时不必一定保留长篇解释文本
+- 更容易把执行链路工程化成“模型前向 -> 轨迹 -> 控制”
+
+这和当前 `MindDrive` 实际代码路径是对齐的。
+
+### 4.2 Curious-VLA 论文更强调“打破窄策略，扩大训练探索”
+
+`Curious-VLA` 论文标题和摘要最强调的点是：
+
+- IL 会造成 narrow policy
+- 这会抑制后续 RL 的探索
+
+它给出的关键设计是：
+
+- `Feasible Trajectory Expansion (FTE)`
+- `Adaptive Diversity-Aware Sampling (ADAS)`
+- `Spanning Driving Reward (SDR)`
+
+也就是说，`Curious-VLA` 论文最主要解决的是：
+
+- 训练阶段如何扩大探索
+- 两阶段 IL + RL 如何更有效
+
+而不是：
+
+- 如何把在线推理压缩成最短执行路径
+
+### 4.3 这会带来一个现实结果
+
+从论文关注点到当前实现的落地方式看：
+
+- `MindDrive` 更容易自然落到“紧凑执行链路”
+- `Curious-VLA` 更容易保留“完整生成式规划接口”
+
+所以当前你在代码里看到的 Curious-VLA 规划输出，不只是轨迹，还包括：
+
+- `critical_objects`
+- `explanation`
+- `meta_behaviour`
+- `future_trajectory`
+
+这不是偶然，而是和它作为 autoregressive reasoning-based planner 的整体思路一致。
+
+## 5. 最关键的区别：推理范式不同
+
+### 5.1 MindDrive 更接近“单次前向直接出轨迹”
 
 在 `MindDrive` 的 agent 实现里，核心路径是：
 
@@ -96,7 +165,7 @@
 - 没有字符串轨迹解析
 - 没有“先生成解释，再生成轨迹”的过程
 
-### 4.2 Curious-VLA 更接近“自回归生成完整规划回答”
+### 5.2 Curious-VLA 更接近“自回归生成完整规划回答”
 
 `Curious-VLA` 当前 NPU benchmark 的 planning 路径是：
 
@@ -122,9 +191,9 @@
 
 这和 MindDrive 的“张量直接输出轨迹”相比，天然更慢。
 
-## 5. 输入形式也不一样
+## 6. 输入形式也不一样
 
-### 5.1 MindDrive 的 1280x704 不等于最终模型张量也变大
+### 6.1 MindDrive 的 1280x704 不等于最终模型张量也变大
 
 `MindDrive` 的 latency 文档写得很清楚：
 
@@ -141,7 +210,7 @@
 - [LATENCY_BENCHMARK.md](/home/ma-user/MindDrive/latency_docs/LATENCY_BENCHMARK.md#L88)
 - [LATENCY_BENCHMARK.md](/home/ma-user/MindDrive/latency_docs/LATENCY_BENCHMARK.md#L101)
 
-### 5.2 Curious-VLA 的 1280x704 会显著推高多模态上下文长度
+### 6.2 Curious-VLA 的 1280x704 会显著推高多模态上下文长度
 
 `Curious-VLA` 当前主文档明确记录了一个关键现象：
 
@@ -164,9 +233,9 @@
 
 这说明 `Curious-VLA` 的一次规划本质上是在做一条很长的多模态 autoregressive generation。
 
-## 6. 输出目标差异非常大
+## 7. 输出目标差异非常大
 
-### 6.1 MindDrive 输出更接近数值回归结果
+### 7.1 MindDrive 输出更接近数值回归结果
 
 MindDrive 在 latency 主路径里主要关心：
 
@@ -176,7 +245,7 @@ MindDrive 在 latency 主路径里主要关心：
 
 这类输出对 decoder 和后处理的压力都更小。
 
-### 6.2 Curious-VLA 输出是“语义 + 结构化文本 + 轨迹”
+### 7.2 Curious-VLA 输出是“语义 + 结构化文本 + 轨迹”
 
 Curious-VLA 的原始输出至少包括：
 
@@ -203,9 +272,9 @@ Curious-VLA 的原始输出至少包括：
 
 - Curious-VLA 的 latency 里，有很大一部分本来就是“输出太长”带来的生成时间
 
-## 7. benchmark 口径本身也不一样
+## 8. benchmark 口径本身也不一样
 
-### 7.1 MindDrive 当前最快的数字来自 pure inference 口径
+### 8.1 MindDrive 当前最快的数字来自 pure inference 口径
 
 `MindDrive` 的正式 offline latency 报告明确写了两种模式：
 
@@ -221,7 +290,7 @@ Curious-VLA 的原始输出至少包括：
 
 - [TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md](/home/ma-user/MindDrive/latency_docs/TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md#L66)
 
-### 7.2 Curious-VLA 当前更偏 planning latency / service latency
+### 8.2 Curious-VLA 当前更偏 planning latency / service latency
 
 `Curious-VLA` 当前主文档里明确区分了两条口径：
 
@@ -244,9 +313,9 @@ Curious-VLA 的原始输出至少包括：
 
 当成完全同一类数字比较。
 
-## 8. 当前实测数字对比
+## 9. 当前实测数字对比
 
-### 8.1 MindDrive
+### 9.1 MindDrive
 
 根据 MindDrive 当前 NPU offline 报告：
 
@@ -258,7 +327,7 @@ Curious-VLA 的原始输出至少包括：
 - [TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md](/home/ma-user/MindDrive/latency_docs/TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md#L66)
 - [TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md](/home/ma-user/MindDrive/latency_docs/TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md#L43)
 
-### 8.2 Curious-VLA
+### 9.2 Curious-VLA
 
 根据 Curious-VLA 当前 NPU 主文档：
 
@@ -273,11 +342,40 @@ Curious-VLA 的原始输出至少包括：
 - [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1079)
 - [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1165)
 
-## 9. 所以真正该怎么理解“Curious-VLA 为什么慢”
+## 10. 一个重要补充：论文目标和当前 benchmark 目标并不完全重合
+
+不能因为 `Curious-VLA` 更慢，就直接说它的方法设计“更差”。
+
+更准确的理解是：
+
+- `MindDrive` 和 `Curious-VLA` 优化的目标并不完全相同
+
+`MindDrive` 论文更强调：
+
+- 在线 RL 的有效探索
+- 语言决策空间设计
+- 闭环驾驶性能
+
+`Curious-VLA` 论文更强调：
+
+- 打破 IL 产生的窄策略
+- 通过更强探索提升两阶段训练效果
+- 让 VLA 模型成为更强的 autoregressive driving baseline
+
+所以在这些维度上：
+
+- 闭环性能
+- 探索性
+- 可解释性
+- latency
+
+两者本来就在做不同的 trade-off。
+
+## 11. 所以真正该怎么理解“Curious-VLA 为什么慢”
 
 更准确的理解应该是：
 
-### 9.1 不是单纯“3B 比 0.5B 慢”
+### 11.1 不是单纯“3B 比 0.5B 慢”
 
 这当然是因素之一，但不是主要解释。
 
@@ -293,7 +391,7 @@ Curious-VLA 的原始输出至少包括：
 - JSON 解析
 - trajectory 解析
 
-### 9.2 更本质的区别是“回归式 planner”对“生成式 planner”
+### 11.2 更本质的区别是“回归式 planner”对“生成式 planner”
 
 MindDrive 更像：
 
@@ -313,7 +411,7 @@ Curious-VLA 更像：
 
 - latency 会明显更高
 
-### 9.3 Curious-VLA 现在最重的部分不是 postprocess，而是 generation 本身
+### 11.3 Curious-VLA 现在最重的部分不是 postprocess，而是 generation 本身
 
 这点在当前 benchmark 里已经非常明显：
 
@@ -334,7 +432,7 @@ Curious-VLA 更像：
 - 是否必须走完整 JSON 格式
 - 是否能把规划结果改成更短的结构化输出
 
-## 10. 一句话总结
+## 12. 一句话总结
 
 `Curious-VLA` 比 `MindDrive` 慢很多，主要不是因为“它是 3B 模型”，而是因为它当前走的是：
 
