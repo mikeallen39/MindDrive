@@ -410,7 +410,7 @@ MINDDRIVE_DEVICE=npu \
 
 ## 13. 当前验证结果与输出说明
 
-### 13.1 用的是什么数据
+### 13.1 用的是什么数据、模型和分辨率
 
 当前 offline latency benchmark 使用的是 **Bench2Drive Mini 的真实样本**，不是 fake sensor，也不依赖 CARLA simulator。
 
@@ -421,6 +421,27 @@ MINDDRIVE_DEVICE=npu \
 - benchmark 会直接读取 dataset sample，然后直连模型 `forward_test`
 - 本机当前可用的是 `train split`，因为本地 `b2d_infos_val.pkl` 为空
 - 本次正式测试的 `dataset_size = 2295`
+
+本次 benchmark 使用的模型配置与权重为：
+
+- 配置文件：`/home/ma-user/MindDrive/adzoo/minddrive/configs/minddrive_qwen2_05B_latency.py`
+- 实际加载 checkpoint：`/home/ma-user/MindDrive/ckpts/minddrive_rltrain.pth`
+- 配置继承基座：`minddrive_qwen2_05B_infer.py`
+- 语言模型类型：`qwen2`
+- LLM / tokenizer 基座路径：`/home/ma-user/MindDrive/ckpts/llava-qwen2-0.5b`
+- 视觉主干：`EVAViT`
+- benchmark summary 中记录的 `effective_config_save_path`：`./results_latency_1280x704/`
+
+本次 benchmark 的图像分辨率相关设置为：
+
+- benchmark 入口参数中的相机输入分辨率：`camera_width = 1280`，`camera_height = 704`
+- `minddrive_qwen2_05B_latency.py` 中的 `ida_aug_conf` 也固定为 `W=1280`、`H=704`
+- 同时该配置的 `final_dim = (320, 640)`，表示图像在进入主干前还会经过下游预处理与缩放
+
+因此在理解 latency 时要区分两层分辨率：
+
+- **原始相机输入分辨率**：`1280 x 704`
+- **模型视觉分支内部使用的预处理后尺寸**：`320 x 640`
 
 本次正式测试参数为：
 
