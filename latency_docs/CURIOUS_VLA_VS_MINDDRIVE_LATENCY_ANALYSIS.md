@@ -330,8 +330,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [LATENCY_BENCHMARK.md](/home/ma-user/MindDrive/latency_docs/LATENCY_BENCHMARK.md#L88)
-- [LATENCY_BENCHMARK.md](/home/ma-user/MindDrive/latency_docs/LATENCY_BENCHMARK.md#L101)
+- [ASCEND_NPU_LATENCY_CHANGELOG.md](./ASCEND_NPU_LATENCY_CHANGELOG.md)
 
 ### 6.2 Curious-VLA 的 1280x704 会显著推高多模态上下文长度
 

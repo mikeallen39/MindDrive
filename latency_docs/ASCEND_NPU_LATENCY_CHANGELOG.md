@@ -503,6 +503,12 @@ MINDDRIVE_DEVICE=npu \
 - **原始相机输入分辨率**：`1280 x 704`
 - **模型视觉分支内部使用的预处理后尺寸**：`320 x 640`
 
+这意味着：
+
+- benchmark 反映的是 `1280 x 704` 的真实采集输入
+- 但模型内部仍保持既有 `final_dim=(320, 640)` 张量假设
+- 这样可以在不改动主干输入约定的前提下，测到更接近目标分辨率场景的 latency
+
 本次正式测试参数为：
 
 - `split=train`
@@ -551,6 +557,11 @@ MINDDRIVE_DEVICE=npu \
 
 - `system_latency`：每一步都重新走 `sample load -> collate -> transfer -> model -> post`，更接近真实离线系统链路
 - `pure_inference_latency`：先把样本预加载并 collate 好，逐步只测 `transfer -> model -> post`，更接近纯模型推理稳态
+
+这两个模式分别对应过去 latency 讨论里的两种口径：
+
+- `system_latency` 更接近部署视角的端到端系统 latency
+- `pure_inference_latency` 更适合隔离数据读取与预处理噪声，观察模型稳态推理耗时
 
 逐阶段 latency 字段：
 
