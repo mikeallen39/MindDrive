@@ -71,19 +71,43 @@
 - [README.md](/home/ma-user/MindDrive/README.md#L27)
 - [README.md](/home/ma-user/MindDrive/README.md#L65)
 
-## 4. 从论文本身看，两者关注点也不同
+## 4. 从论文本身看，两者的整体生成范式就不同
 
 这里先说明一下本节的信息来源：
 
 - `MindDrive`：本次补充基于 arXiv HTML 正文、项目 README 和代码实现
-- `Curious-VLA`：在不继续下载 PDF 的前提下，本次补充主要基于 arXiv 摘要、项目 README 和当前仓库实现
+- `Curious-VLA`：本次补充基于 arXiv HTML 正文、项目 README 和当前仓库实现
 
 因此：
 
-- 关于 `MindDrive` 的归纳更接近“论文正文级确认”
-- 关于 `Curious-VLA` 的归纳更接近“摘要 + 代码实现一致性分析”
+- 下面的比较已经不只是“摘要级理解”
+- 而是尽量从论文方法定义出发，再和当前代码形态对齐
 
-### 4.1 MindDrive 论文更强调“把连续动作问题转成语言决策问题”
+### 4.1 先给一个总框架：两篇论文都在做 VLA，但“生成对象”不一样
+
+如果把自动驾驶 VLA 统一写成：
+
+- 输入：视觉 + 状态/历史 + 导航意图
+- 中间：模型内部形成某种“可优化的决策表示”
+- 输出：未来轨迹 / 控制
+
+那么两篇论文最大的不同，不是是否用了语言，也不是是否用了 RL，而是：
+
+- `MindDrive` 先生成离散语言决策，再把它映射成轨迹
+- `Curious-VLA` 直接把“结构化推理 + 轨迹”本身当作生成对象
+
+换句话说：
+
+- `MindDrive` 的语言更像一个中间动作接口
+- `Curious-VLA` 的语言更像最终规划结果的一部分
+
+这会直接决定：
+
+- 在线推理时到底需不需要长文本 decode
+- RL 应该优化哪一层表示
+- latency 的主要成本落在哪个环节
+
+### 4.2 MindDrive 的整体生成范式：先离散决策，再动态映射为连续轨迹
 
 从 `MindDrive` 论文与 README 的表述看，它的核心思想是：
 
@@ -91,18 +115,47 @@
 - 用一个 Action Expert 把语言决策映射到可行轨迹
 - 再把轨迹级奖励反馈回语言决策空间
 
+如果按“信息流”展开，MindDrive 更接近下面这条链路：
+
+1. 多视角图像和导航指令进入共享基座 VLM
+2. `Decision Expert` 生成高层 `meta-action`
+3. `Action Expert` 根据 `meta-action + 场景` 产生速度轨迹和路径轨迹
+4. 再通过 `VAE + GRU decoder` 对齐语言空间与动作空间，得到最终 action trajectory
+5. 在线 RL 时，奖励不是直接在原始连续轨迹空间里无约束搜索，而是先作用到 `meta-action` 这一层
+
+这件事非常关键，因为它说明 MindDrive 的“生成”其实被拆成了两层：
+
+- 第一层生成的是有限语言动作
+- 第二层才是轨迹生成 / 解码
+
+因此它不是那种“直接让 VLM 从头到尾写完整规划答案”的路线。
+
+从论文定义看，MindDrive 的语言在系统里承担的是：
+
+- 离散化探索空间
+- 承接高层因果推理
+- 作为 Action Expert 的条件输入
+
+而不是：
+
+- 对外输出长篇解释
+- 直接作为最终 planner 接口协议
+
 这意味着它在方法设计上就倾向于：
 
 - 把困难的连续动作探索，转到更紧凑的有限语言决策空间里
+- 把轨迹生成约束在一个受控的 language-to-action mapping 里
+- 把在线 RL 的优化重心放在“决策对不对”，而不是“把整段最终答案写得多完整”
 
 这件事对 latency 的启发是：
 
 - 在线执行时不必一定保留长篇解释文本
 - 更容易把执行链路工程化成“模型前向 -> 轨迹 -> 控制”
+- 一旦 `meta-action -> trajectory` 映射建立好，在线时可以更像一个紧凑 planner，而不是一个开放式生成器
 
 这和当前 `MindDrive` 实际代码路径是对齐的。
 
-### 4.2 Curious-VLA 论文更强调“打破窄策略，扩大训练探索”
+### 4.3 Curious-VLA 的整体生成范式：把推理过程和轨迹一起作为可学习生成对象
 
 `Curious-VLA` 论文标题和摘要最强调的点是：
 
@@ -115,6 +168,76 @@
 - `Adaptive Diversity-Aware Sampling (ADAS)`
 - `Spanning Driving Reward (SDR)`
 
+但如果只记住这三个缩写，其实还不够。更重要的是要看到 Curious-VLA 把“什么东西算作模型输出”定义得更重。
+
+从论文正文看，Curious-VLA 的 IL 阶段不只是做普通 SFT，而是做了一套完整的“生成对象扩展”：
+
+1. 先做 `FTE`，把单一 GT 轨迹扩展成多个 physically valid feasible trajectories
+2. 再做 CoT data synthesis，把每个样本组织成四段式推理链：
+   - `critical object perception`
+   - `driving explanation`
+   - `meta-behavior description`
+   - `trajectory prediction`
+3. 再通过 `step-wise normalization` 让长时域 waypoint 预测更稳定
+
+也就是说，Curious-VLA 在训练时强化的不是一个“紧凑中间 token 接口”，而是一个完整的结构化生成过程。
+
+它真正想让模型学会的是：
+
+- 先看懂关键目标
+- 再说清楚为什么这样开
+- 再给出行为语义
+- 最后输出轨迹
+
+因此它的“生成对象”天然就是：
+
+- reasoning chain
+- structured textual planner state
+- future trajectory
+
+而不是仅仅一个可以再映射的中间离散动作。
+
+### 4.4 Curious-VLA 的 RL 也不是在压缩输出，而是在放大探索
+
+MindDrive 的在线 RL 更像：
+
+- 把优化重点放在“高层决策 token 选得对不对”
+
+Curious-VLA 的 RL 则更像：
+
+- 尽量让策略在训练中保持足够大的行为分布宽度
+- 让奖励对优劣驾驶行为更敏感
+- 避免策略坍缩到单一、保守、窄化的输出模式
+
+`ADAS` 的核心作用是：
+
+- 选出在当前策略下仍然能产生高方差、高多样性 rollout 的场景
+
+`SDR` 的核心作用是：
+
+- 放大 PDMS / EPDMS 奖励差异，让 RL 更容易分辨“稍好”和“明显更好”的驾驶
+
+所以 Curious-VLA 的 RL 目标并不是：
+
+- 把语言层压缩成更短的中间动作表示
+
+而是：
+
+- 让一个本来就会生成完整规划答案的 autoregressive policy，生成得更多样、更可探索、质量更高
+
+### 4.5 把两者放在一张表里看，会更清楚
+
+| 维度 | MindDrive | Curious-VLA |
+| --- | --- | --- |
+| 论文核心问题 | 连续动作空间下在线 RL 探索效率低 | IL 导致 narrow policy，后续 RL 探索不足 |
+| 语言在系统中的角色 | 中间决策接口 | 最终规划输出的一部分 |
+| 主要生成对象 | `meta-action` | `critical_objects + explanation + meta_behaviour + trajectory` |
+| 系统分解方式 | `Decision Expert -> Action Expert -> trajectory` | 单一 autoregressive planner 直接生成结构化规划回答 |
+| IL 的重点 | 建立 language-to-action mapping | 扩展 feasible trajectory 分布并配套 CoT 监督 |
+| RL 的重点 | 用轨迹回报优化高层决策空间 | 用 ADAS/SDR 维持并放大探索能力 |
+| 在线执行时更像 | 语言决策驱动的轨迹解码器 | reasoning-first 的生成式 planner |
+| 对 latency 的天然影响 | 更容易压成短链路 | 更容易保留长 prompt + 长 decode |
+
 也就是说，`Curious-VLA` 论文最主要解决的是：
 
 - 训练阶段如何扩大探索
@@ -124,7 +247,7 @@
 
 - 如何把在线推理压缩成最短执行路径
 
-### 4.3 这会带来一个现实结果
+### 4.6 这会带来一个现实结果
 
 从论文关注点到当前实现的落地方式看：
 
@@ -391,15 +514,20 @@ Curious-VLA 的原始输出至少包括：
 - JSON 解析
 - trajectory 解析
 
-### 11.2 更本质的区别是“回归式 planner”对“生成式 planner”
+### 11.2 更本质的区别是“两阶段语言决策-动作映射”对“端到端生成式 planner”
 
 MindDrive 更像：
 
-- 直接回归轨迹的 planner
+- 先形成高层语言决策，再映射到轨迹的 planner
 
 Curious-VLA 更像：
 
 - reasoning-first 的生成式 planner
+
+更准确地说：
+
+- `MindDrive` 不是完全不用语言，而是把语言放在中间层，当作更可控、更易探索的动作接口
+- `Curious-VLA` 则把语言推理链本身保留到了最终输出层，轨迹只是完整规划回答的一部分
 
 生成式 planner 的优势是：
 
