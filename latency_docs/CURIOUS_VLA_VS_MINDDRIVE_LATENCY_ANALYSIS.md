@@ -316,7 +316,180 @@ Curious-VLA 的 RL 则更像：
 
 ## 6. 输入形式也不一样
 
-### 6.1 MindDrive 的 1280x704 不等于最终模型张量也变大
+### 6.1 先澄清一个容易误解的点：当前公开默认评测输入并不是“两边都是多视角长序列”
+
+如果只看论文标题或都把它们归类为自动驾驶 VLA，很容易下意识觉得：
+
+- `Curious-VLA` 和 `MindDrive` 都是在吃多视角长序列视觉输入
+
+但从当前公开代码和默认评测路径看，这个理解并不准确。
+
+更准确地说：
+
+- `MindDrive` 当前公开主推理路径是“多视角、但不是长时序图像序列”
+- `Curious-VLA` 当前公开主推理路径更接近“单前视图 + 短历史状态文本”，也不是长时序图像序列
+
+这点很重要，因为它直接关系到：
+
+- 你现在对 `Curious-VLA` 做的 latency benchmark 是否测偏了
+
+答案是：
+
+- 目前这套 benchmark 不能算“把 Curious-VLA 测错了”
+- 如果你的目标是对齐当前仓库默认公开评测路径，它反而基本是对的
+
+### 6.2 MindDrive 的默认在线输入：6 相机，但 `queue_length = 1`
+
+`MindDrive` 当前 agent 主路径里，会显式读取 6 路相机：
+
+- `CAM_FRONT`
+- `CAM_FRONT_LEFT`
+- `CAM_FRONT_RIGHT`
+- `CAM_BACK`
+- `CAM_BACK_LEFT`
+- `CAM_BACK_RIGHT`
+
+参考：
+
+- [minddrive_b2d_agent.py](/home/ma-user/MindDrive/team_code/minddrive_b2d_agent.py#L445)
+
+所以它确实是多视角。
+
+但它又不是长序列图像输入，因为当前 infer 配置里写得很清楚：
+
+- `queue_length = 1`
+
+也就是：
+
+- 每个 sequence 当前只包含 1 帧
+
+参考：
+
+- [minddrive_qwen25_3B_infer.py](/home/ma-user/MindDrive/adzoo/minddrive/configs/minddrive_qwen25_3B_infer.py#L152)
+
+因此，MindDrive 当前更接近：
+
+- 单时刻 6 相机输入
+
+而不是：
+
+- 多时刻长视频序列输入
+
+### 6.3 Curious-VLA 的当前公开默认评测路径：单前视图 + 短历史轨迹文本
+
+`Curious-VLA` 这边更容易让人误解，因为它代码里确实支持：
+
+- `single`
+- `multi_view`
+- `cont`
+
+也就是：
+
+- 单前视图
+- 多视角
+- 连续前视图序列
+
+参考：
+
+- [navsim_qwen_norm_agent_cot.py](/home/ma-user/curious_vla/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L69)
+
+但关键在于：
+
+- 当前公开默认值是 `cam_type='single'`
+
+并且它的 `SensorConfig` 默认只开了 `cam_f0`：
+
+- `cam_f0=True`
+- 其它相机默认关闭
+
+参考：
+
+- [navsim_qwen_norm_agent_cot.py](/home/ma-user/curious_vla/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L93)
+
+当前公开 prompt 也和这个设计是对齐的，它明确写的是：
+
+- `1 frame of front-view image`
+- `1.5-second past trajectory`
+
+参考：
+
+- [run_vllm_semantic_validation.py](/home/ma-user/curious_vla/local/run_vllm_semantic_validation.py#L251)
+
+连训练数据文档也在强调：
+
+- 数据里的 `images` 列是 front-view camera images
+
+参考：
+
+- [train_grpo.md](/home/ma-user/curious_vla/docs/train_grpo.md#L75)
+
+所以，从当前公开仓库能直接确认的默认路径看，Curious-VLA 更接近：
+
+- 单前视图图像
+- 加上短历史轨迹文本
+- 再做自回归生成式规划
+
+而不是：
+
+- 6 相机长时序视频输入
+
+### 6.4 这意味着：你现在这套 Curious-VLA latency benchmark 不是“测轻了所以不公平”，反而已经是默认公开路径
+
+这点对理解 latency 非常关键。
+
+如果有人直觉上觉得：
+
+- Curious-VLA 论文应该是多视角长序列
+- 你现在只测单前视图，所以这个 latency benchmark 可能设计错了
+
+那么从当前公开实现看，更合理的判断其实是：
+
+- 你现在这套 benchmark 没有把 Curious-VLA “简化错”
+- 它基本就是沿着当前公开默认评测路径在测
+
+甚至可以说：
+
+- 你现在测到的还是 Curious-VLA 相对更轻的一条输入路径
+
+因为如果后面真的把它切到：
+
+- `multi_view`
+- 或 `cont`
+
+那么图像 token 和上下文长度通常只会更大，latency 大概率只会更高，不会更低。
+
+所以这里真正该得出的结论不是：
+
+- 当前 benchmark 低估了 Curious-VLA latency
+
+而是：
+
+- 即便在当前这条“公开默认、而且相对更轻”的输入路径上，Curious-VLA 依然已经比 MindDrive 慢很多
+
+这恰恰更能说明：
+
+- 两者的 latency 差异，主要不是因为你 benchmark 设计错了
+- 而是因为默认公开实现下，两边的推理范式和输出协议本来就差很多
+
+### 6.5 在输入维度上，更准确的对比应该是
+
+- `MindDrive`：6 相机单时刻输入 + 直接张量输出轨迹/控制
+- `Curious-VLA`：单前视图 + 短历史轨迹文本 + 长文本自回归规划输出
+
+这也解释了一个看似反常的问题：
+
+- 为什么 `MindDrive` 虽然是多视角，latency 仍然比 `Curious-VLA` 低很多
+
+因为当前瓶颈并不主要落在“是不是 6 个视角”这件事上，而更主要落在：
+
+- 长 prompt
+- 长 decode
+- 结构化文本生成
+- 轨迹出现在回答后半段
+
+这几个环节上。
+
+### 6.6 MindDrive 的 1280x704 不等于最终模型张量也变大
 
 `MindDrive` 的 latency 文档写得很清楚：
 
@@ -332,7 +505,7 @@ Curious-VLA 的 RL 则更像：
 
 - [ASCEND_NPU_LATENCY_CHANGELOG.md](./ASCEND_NPU_LATENCY_CHANGELOG.md)
 
-### 6.2 Curious-VLA 的 1280x704 会显著推高多模态上下文长度
+### 6.7 Curious-VLA 的 1280x704 会显著推高多模态上下文长度
 
 `Curious-VLA` 当前主文档明确记录了一个关键现象：
 
