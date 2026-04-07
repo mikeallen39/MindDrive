@@ -608,6 +608,107 @@ Curious-VLA 的原始输出至少包括：
 
 当成完全同一类数字比较。
 
+### 8.3 还要再澄清一点：当前两边测的都不是“论文自带 benchmark 原样复现”
+
+这一点非常重要。
+
+如果问题是：
+
+- 现在拿来对比的这些 latency 数字，是不是两篇论文原封不动自带的官方 benchmark？
+
+答案其实是：
+
+- 不是
+
+更准确地说，当前两边跑的都是：
+
+- 为了 NPU / 工程时延分析单独补出来的 latency benchmark
+
+而不是：
+
+- 论文主结果里原样那套官方 benchmark
+
+#### 8.3.1 Curious-VLA
+
+`Curious-VLA` 论文和 README 的主结果，是：
+
+- `Navsim` benchmark 上的
+  - `PDMS`
+  - `EPDMS`
+  - `Best-of-N PDMS`
+
+也就是说，论文主 benchmark 本质上是在回答：
+
+- 规划质量好不好
+- 闭环 / 仿真评分高不高
+
+而当前 NPU 文档里写得很清楚，这轮实际跑通的是：
+
+- `model-only latency benchmark`
+- `compute_trajectory()` planning latency benchmark
+- `vllm-ascend` 服务化 planning latency benchmark
+
+并且当前还没有补成：
+
+- 完整 `PDM / EPDMS` 质量评测
+- `SceneLoader + sequential worker + 全套 PDM eval` 的统一时延统计
+
+所以 Curious-VLA 当前这些 latency 数字，应该理解为：
+
+- 后补的 NPU engineering benchmark
+
+而不是：
+
+- 论文主 benchmark 的原样 latency 版
+
+#### 8.3.2 MindDrive
+
+`MindDrive` 论文和 README 的主 benchmark，是：
+
+- `Bench2Drive` closed-loop benchmark
+
+论文主结果看的是：
+
+- `DS`
+- `RC`
+- `SR`
+
+这说明论文主 benchmark 本质上是在回答：
+
+- 闭环驾驶表现好不好
+
+而当前 NPU 文档里真正跑的是：
+
+- `offline latency benchmark`
+
+这条路径会：
+
+- 直接读取真实 dataset sample
+- 直连模型 `forward_test`
+- 分成 `system_latency` 和 `pure_inference_latency`
+
+它显然不是论文原始 closed-loop benchmark 本身，而是：
+
+- 为 NPU latency 分析专门构造的工程 benchmark
+
+#### 8.3.3 所以当前这份文档里比较的，其实是“工程 latency 口径”而不是“论文 official benchmark latency”
+
+因此，当前这份对比里最准确的说法应该是：
+
+- `Curious-VLA`：测的是后补的 Navsim planning / service latency
+- `MindDrive`：测的是后补的 Bench2Drive offline latency
+
+它们都和各自论文任务有关，但都不是：
+
+- 论文里原封不动的官方 benchmark
+
+更直白一点说：
+
+- 论文 benchmark 主要回答“成绩好不好”
+- 当前 latency benchmark 主要回答“在 NPU 上跑起来有多快”
+
+这两个问题相关，但不是同一个问题。
+
 ## 9. 当前实测数字对比
 
 ### 9.1 MindDrive
