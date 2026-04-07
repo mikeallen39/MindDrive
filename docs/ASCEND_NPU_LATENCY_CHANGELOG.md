@@ -529,20 +529,49 @@ MINDDRIVE_DEVICE=npu \
 
 - **offline latency benchmark**
 
+当前 `offline latency` 的最新实现方式：
+
+- 不再通过 `MinddriveAgent.run_step()` 喂 fake sensor 输入
+- 改为直接读取真实 `Bench2Drive` dataset sample，随后直连模型 `forward_test`
+- 同时输出两类结果：
+  - latency 统计
+  - 基于 GT 轨迹的基础合理性检查，例如 `ego/path FDE`、有限值检查、轨迹边界检查
+
 当前没有在本文档内继续推进的内容：
 
 - 完整 closed-loop CARLA NPU benchmark
 - 面向大规模实验的自动化脚本收敛
 - 对所有历史 GPU 假设进行全仓统一清理
 
-### 15.3 建议下一步
+### 15.3 当前真实数据阻塞
+
+仓库当前本地只有：
+
+- `data/chat-B2D`
+
+但真实视觉 offline benchmark 还额外要求：
+
+- `data/bench2drive`
+- `data/infos/b2d_infos_train.pkl`
+- `data/infos/b2d_infos_val.pkl`
+- `data/infos/b2d_map_infos.pkl`
+
+因此当前脚本的行为是：
+
+- 如果这些真实数据资产缺失，则直接报错退出
+- 不再回退到 random/synthetic 输入
+
+这是一项有意的约束，目的是避免得到不具备实际意义的 latency 结果
+
+### 15.4 建议下一步
 
 后续建议按以下顺序继续：
 
-1. 将 `mmcv/utils/fp16_utils.py` 改为 device-aware autocast
-2. 清理与 NPU 无关的旧路径硬编码和遗留 warning
-3. 将本次 NPU latency 运行流程补充到 `README.md` 或 `docs/LATENCY_BENCHMARK.md`
-4. 视需要补充 closed-loop CARLA on NPU 的正式验证
+1. 准备 `Bench2Drive` 原始图像与地图数据，并生成 `data/infos/*.pkl`
+2. 在真实数据齐备后运行新的 real-data offline latency benchmark
+3. 将 `mmcv/utils/fp16_utils.py` 改为 device-aware autocast
+4. 清理与 NPU 无关的旧路径硬编码和遗留 warning
+5. 视需要补充 closed-loop CARLA on NPU 的正式验证
 
 ## 16. 一键复现命令
 
@@ -560,6 +589,11 @@ MINDDRIVE_LATENCY_WARMUP_STEPS=0 \
 /home/ma-user/MindDrive/scripts/run_minddrive_05b_latency_offline.sh --steps 1
 ```
 
+说明：
+
+- 若缺少 `data/bench2drive` 或 `data/infos/*.pkl`，该命令现在会明确报错
+- 这是预期行为
+
 ### 16.3 稳态 3-step 测试
 
 ```bash
@@ -575,4 +609,3 @@ MINDDRIVE_DEVICE=npu \
 ```bash
 cat /home/ma-user/MindDrive/results_latency_offline_1280x704_steps3/combined_summary.json
 ```
-
