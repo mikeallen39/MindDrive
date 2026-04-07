@@ -6,9 +6,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export MINDDRIVE_ROOT="${ROOT_DIR}"
-export CARLA_ROOT="${CARLA_ROOT:-${ROOT_DIR}/carla}"
 export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/rl_projects:${ROOT_DIR}/rl_projects/scenario_runner:${ROOT_DIR}/team_code:${PYTHONPATH:-}"
+
+if [[ -z "${CARLA_ROOT:-}" ]]; then
+  for candidate in \
+    "${ROOT_DIR}/carla" \
+    "/cache/carla" \
+    "/data/carla" \
+    "/home/ma-user/work/carla" \
+    "/home/carla"
+  do
+    if [[ -d "${candidate}" ]]; then
+      export CARLA_ROOT="${candidate}"
+      break
+    fi
+  done
+fi
+
+export CARLA_ROOT="${CARLA_ROOT:-${ROOT_DIR}/carla}"
 
 ASCEND_SET_ENV_SH="${ASCEND_SET_ENV_SH:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
 if [[ -f "${ASCEND_SET_ENV_SH}" ]]; then
@@ -19,6 +35,11 @@ fi
 
 if [[ -d "${CARLA_ROOT}/PythonAPI" ]]; then
   export PYTHONPATH="${CARLA_ROOT}/PythonAPI:${CARLA_ROOT}/PythonAPI/carla:${PYTHONPATH}"
+  if compgen -G "${CARLA_ROOT}/PythonAPI/carla/dist/carla-*.egg" > /dev/null; then
+    for egg_path in "${CARLA_ROOT}"/PythonAPI/carla/dist/carla-*.egg; do
+      export PYTHONPATH="${egg_path}:${PYTHONPATH}"
+    done
+  fi
 fi
 
 if [[ -z "${MINDDRIVE_PYTHON:-}" ]]; then

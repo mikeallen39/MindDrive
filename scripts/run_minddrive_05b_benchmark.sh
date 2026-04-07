@@ -50,6 +50,8 @@ export SAVE_PATH="${SAVE_PATH}"
 
 mkdir -p "$(dirname "${CHECKPOINT_ENDPOINT}")" "${SAVE_PATH}"
 
+"${MINDDRIVE_PYTHON}" "${SCRIPT_DIR}/check_minddrive_carla_env.py" --require-runtime
+
 "${MINDDRIVE_PYTHON}" "${LEADERBOARD_ROOT}/leaderboard_evaluator.py" \
   --routes="${ROUTES}" \
   --repetitions="${REPETITIONS}" \
