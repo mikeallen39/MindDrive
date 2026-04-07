@@ -21,7 +21,7 @@ except ImportError:
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG = str(REPO_ROOT / "adzoo" / "minddrive" / "configs" / "minddrive_qwen2_05B_latency.py")
 DEFAULT_CKPT = str(REPO_ROOT / "ckpts" / "minddrive_rltrain.pth")
-DEFAULT_OUTPUT_DIR = str(REPO_ROOT / "results_latency_offline_1280x704")
+DEFAULT_OUTPUT_NAME = "latency_offline_1280x704"
 CUSTOM_FP16_FLAGS = {
     "map_head": False,
     "pts_bbox_head": False,
@@ -64,6 +64,16 @@ def device_info(device):
     return info
 
 
+def results_device_bucket(device):
+    if device in {"cuda", "gpu"}:
+        return "gpu"
+    return device
+
+
+def default_output_dir(device):
+    return REPO_ROOT / "results" / results_device_bucket(device) / DEFAULT_OUTPUT_NAME
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Offline latency benchmark for MindDrive using real Bench2Drive samples"
@@ -79,7 +89,7 @@ def parse_args():
     parser.add_argument("--max-ego-fde", type=float, default=20.0)
     parser.add_argument("--max-path-fde", type=float, default=25.0)
     parser.add_argument("--max-traj-abs-m", type=float, default=150.0)
-    parser.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-dir", default=None)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=704)
     return parser.parse_args()
@@ -142,7 +152,7 @@ def custom_wrap_fp16_model(model):
             model._modules[module_name].fp16_enabled = enabled
 
 
-def build_runtime(config_path, ckpt_path, split):
+def build_runtime(config_path, ckpt_path, split, device=None):
     from mmcv import Config
     from mmcv.datasets import build_dataset
     from mmcv.models import build_model
@@ -158,7 +168,7 @@ def build_runtime(config_path, ckpt_path, split):
     model = build_model(cfg.model, train_cfg=cfg.get("train_cfg"), test_cfg=cfg.get("test_cfg"))
     load_checkpoint(model, ckpt_path, map_location="cpu")
 
-    device = infer_device()
+    device = device or infer_device()
     model.to(device)
     model.eval()
     if device != "cpu":
@@ -489,13 +499,16 @@ def main():
     torch.set_grad_enabled(False)
     os.chdir(REPO_ROOT)
 
-    output_dir = pathlib.Path(args.output_dir)
+    device = infer_device()
+    output_dir = pathlib.Path(args.output_dir) if args.output_dir else default_output_dir(device)
     output_dir.mkdir(parents=True, exist_ok=True)
+    args.output_dir = str(output_dir)
 
     cfg, dataset, model, device = build_runtime(
         config_path=args.config,
         ckpt_path=args.checkpoint,
         split=args.split,
+        device=device,
     )
     iteration_indices, sample_pool = make_sample_indices(
         dataset_len=len(dataset),

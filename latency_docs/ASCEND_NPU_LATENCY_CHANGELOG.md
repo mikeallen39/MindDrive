@@ -392,75 +392,176 @@ PY
 - `mmcv._ext` 可导入
 - `torch.npu.is_available()` 为 `True`
 
-### 12.2 单步 offline latency smoke test
+### 12.3 正式 offline latency 验证
 
 验证命令：
 
 ```bash
 source /home/ma-user/MindDrive/scripts/env_minddrive_b2d.sh
 MINDDRIVE_DEVICE=npu \
-MINDDRIVE_LATENCY_WARMUP_STEPS=0 \
-/home/ma-user/MindDrive/scripts/run_minddrive_05b_latency_offline.sh --steps 1
+"${MINDDRIVE_PYTHON}" /home/ma-user/MindDrive/scripts/benchmark_minddrive_latency_offline.py \
+  --split train \
+  --steps 55 \
+  --warmup-steps 5 \
+  --sample-pool-size 55 \
+  --start-index 0 \
+  --output-dir /home/ma-user/MindDrive/results/npu/latency_offline_train_steps55_warmup5
 ```
 
-结果：
+## 13. 当前验证结果与输出说明
 
-- 成功运行
-- 产出 summary 与 record 文件
-- 首次运行包含明显的 Ascend 图编译冷启动开销
+### 13.1 用的是什么数据
 
-### 12.3 稳态 offline latency 验证
+当前 offline latency benchmark 使用的是 **Bench2Drive Mini 的真实样本**，不是 fake sensor，也不依赖 CARLA simulator。
 
-验证命令：
+具体来说：
+
+- 数据源来自 `data/bench2drive/` 的真实多相机图像与地图资产
+- 标注与索引来自 `data/infos/b2d_infos_train.pkl`、`data/infos/b2d_infos_val.pkl`、`data/infos/b2d_map_infos.pkl`
+- benchmark 会直接读取 dataset sample，然后直连模型 `forward_test`
+- 本机当前可用的是 `train split`，因为本地 `b2d_infos_val.pkl` 为空
+- 本次正式测试的 `dataset_size = 2295`
+
+本次正式测试参数为：
+
+- `split=train`
+- `steps=55`
+- `warmup_steps=5`
+- `sample_pool_size=55`
+- `start_index=0`
+
+因此：
+
+- 第 `0-4` 步只用于 warmup，不计入统计
+- 第 `5-54` 步共 `50` 个真实样本计入最终 latency
+- 本次实际使用的样本索引池为 `0..54`
+
+### 13.2 输出目录与文件
+
+现在 benchmark 的默认输出目录会根据自动检测到的设备落到：
+
+- `results/npu/latency_offline_1280x704`
+- `results/gpu/latency_offline_1280x704`
+- `results/cpu/latency_offline_1280x704`
+
+如果显式传入 `--output-dir` 或设置 `MINDDRIVE_OUTPUT_DIR`，则以用户指定路径为准。
+
+本次正式测试结果位于：
+
+- `/home/ma-user/MindDrive/results/npu/latency_offline_train_steps55_warmup5/`
+
+目录内主要文件包括：
+
+- `combined_summary.json`
+- `system_latency_summary.json`
+- `pure_inference_latency_summary.json`
+- `system_latency_records.json`
+- `pure_inference_latency_records.json`
+
+含义如下：
+
+- `combined_summary.json`：两种模式的总汇总，适合直接看最终 benchmark 结论
+- `*_summary.json`：单一模式的聚合统计
+- `*_records.json`：逐 step 明细，包含 `warmup` 标记、样本索引、各阶段耗时和 sanity 结果
+
+### 13.3 输出字段是什么意思
+
+两种 benchmark 模式：
+
+- `system_latency`：每一步都重新走 `sample load -> collate -> transfer -> model -> post`，更接近真实离线系统链路
+- `pure_inference_latency`：先把样本预加载并 collate 好，逐步只测 `transfer -> model -> post`，更接近纯模型推理稳态
+
+逐阶段 latency 字段：
+
+- `sample_ms`：从 dataset 中读取单个样本的时间
+- `collate_ms`：把单样本组装成 batch 结构的时间
+- `transfer_ms`：把 batch 从 CPU 送到设备侧的时间
+- `prepare_ms`：准备阶段总时间，等于从 step 开始到模型前向开始，通常约等于 `sample + collate + transfer`
+- `model_ms`：模型前向本身的时间
+- `post_ms`：前向结束后，做输出解析和 sanity 检查的时间
+- `e2e_ms`：该 step 的端到端时间，等于 `prepare + model + post`
+
+summary 中的 sanity 字段：
+
+- `basic_sanity_pass/basic_sanity_total`：预测结果是否存在、形状是否正确、数值是否有限、轨迹是否没有明显爆炸
+- `gt_reasonableness_pass/gt_reasonableness_total`：在有 GT 的样本上，预测终点误差是否落在设定阈值内
+- `ego_fde_m`：自车未来轨迹的终点误差统计
+- `path_fde_m`：规划路径未来点的终点误差统计
+
+record 中每个 step 还会保存：
+
+- `step`：当前迭代序号
+- `sample_index`：对应的 dataset 样本索引
+- `warmup`：该 step 是否属于 warmup
+- `sanity.basic_sanity_ok`：该步基础合法性是否通过
+- `sanity.gt_reasonableness_ok`：该步 GT 合理性是否通过
+- `sanity.ego_fde` / `sanity.path_fde`：该步的具体终点误差
+
+### 13.4 正式结果：5 steps warmup + 50 steps measured
+
+正式命令：
 
 ```bash
 source /home/ma-user/MindDrive/scripts/env_minddrive_b2d.sh
 MINDDRIVE_DEVICE=npu \
-/home/ma-user/MindDrive/scripts/run_minddrive_05b_latency_offline.sh \
-  --steps 3 \
-  --warmup-steps 1 \
-  --output-dir /home/ma-user/MindDrive/results_latency_offline_1280x704_steps3
+"${MINDDRIVE_PYTHON}" /home/ma-user/MindDrive/scripts/benchmark_minddrive_latency_offline.py \
+  --split train \
+  --steps 55 \
+  --warmup-steps 5 \
+  --sample-pool-size 55 \
+  --start-index 0 \
+  --output-dir /home/ma-user/MindDrive/results/npu/latency_offline_train_steps55_warmup5
 ```
 
-## 13. 当前验证结果
+正式结果来自：
 
-结果文件：
-
-- `/home/ma-user/MindDrive/results_latency_offline_1280x704/combined_summary.json`
-- `/home/ma-user/MindDrive/results_latency_offline_1280x704_steps3/combined_summary.json`
-
-### 13.1 单步结果
-
-单步结果主要用于验证功能打通，不适合作为正式 steady-state latency：
-
-- `pure_inference_latency.e2e_ms ≈ 1305.396`
-- `system_latency.e2e_ms ≈ 55570.522`
-
-说明：
-
-- `system_latency` 的 55 秒主要是首次图编译冷启动
-
-### 13.2 3 步、1 步 warmup 的稳态结果
-
-来自：
-
-- `/home/ma-user/MindDrive/results_latency_offline_1280x704_steps3/combined_summary.json`
-
-#### `pure_inference_latency`
-
-- `model_ms.mean = 644.3615`
-- `e2e_ms.mean = 1015.7495`
+- `/home/ma-user/MindDrive/results/npu/latency_offline_train_steps55_warmup5/combined_summary.json`
 
 #### `system_latency`
 
-- `model_ms.mean = 647.3295`
-- `e2e_ms.mean = 1208.513`
+- `count_effective = 50`
+- `sample_ms.mean = 723.984`
+- `collate_ms.mean = 5.846`
+- `transfer_ms.mean = 3.706`
+- `prepare_ms.mean = 733.537`
+- `model_ms.mean = 640.608`
+- `post_ms.mean = 0.537`
+- `e2e_ms.mean = 1374.681`
+- `e2e_ms.p50 = 1360.514`
+- `e2e_ms.p90 = 1440.529`
+- `e2e_ms.p95 = 1468.525`
+- `basic_sanity_pass = 50 / 50`
+- `gt_reasonableness_pass = 48 / 50`
+- `ego_fde_m.mean = 2.306`
+- `ego_fde_m.p95 = 18.796`
+- `path_fde_m.mean = 0.120`
+- `path_fde_m.p95 = 0.460`
 
-这说明：
+#### `pure_inference_latency`
 
-- 去掉 JPEG roundtrip 后，纯推理链路约在 `1.0s` 左右
-- 保留系统侧图像处理后，端到端约在 `1.2s` 左右
-- 两者的 `model_ms` 接近，说明主要差异来自前后处理而不是模型前向
+- `count_effective = 50`
+- `transfer_ms.mean = 5.673`
+- `prepare_ms.mean = 5.676`
+- `model_ms.mean = 644.222`
+- `post_ms.mean = 0.635`
+- `e2e_ms.mean = 650.533`
+- `e2e_ms.p50 = 648.115`
+- `e2e_ms.p90 = 667.108`
+- `e2e_ms.p95 = 676.202`
+- `basic_sanity_pass = 50 / 50`
+- `gt_reasonableness_pass = 48 / 50`
+- `ego_fde_m.mean = 2.307`
+- `ego_fde_m.p95 = 18.797`
+- `path_fde_m.mean = 0.120`
+- `path_fde_m.p95 = 0.462`
+
+结论：
+
+- 在当前 Ascend NPU offline real-data 路径下，**纯模型稳态推理**约为 `650.5ms`
+- 若把真实样本读取和 batch 组装一并算入，**系统端到端稳态 latency**约为 `1374.7ms`
+- 两种模式的 `model_ms` 非常接近，说明差异主要来自数据读取、collate 和设备前准备，而不是模型前向本身
+- `GT reasonableness` 只有 `2` 个样本未通过阈值，分别是 `sample_index=8` 和 `sample_index=9`
+- 这两个失败点都是 `ego_fde` 略微超过 `20m` 阈值，约为 `20.05m` 和 `20.89m`，`path_fde` 仍保持正常，因此当前结果仍可视为“latency 有效、输出整体合理”
 
 ## 14. 产物目录
 
@@ -496,8 +597,7 @@ MINDDRIVE_DEVICE=npu \
 本轮产生的运行或调试产物包括：
 
 - `logs/`
-- `results_latency_offline_1280x704/`
-- `results_latency_offline_1280x704_steps3/`
+- `results/npu/latency_offline_train_steps55_warmup5/`
 - `fusion_result.json`
 - `ge_check_op.json`
 
@@ -625,31 +725,27 @@ MINDDRIVE_DEVICE=npu \
 source /home/ma-user/MindDrive/scripts/env_minddrive_b2d.sh
 ```
 
-### 16.2 单步 smoke test
+### 16.2 正式 benchmark
 
 ```bash
 MINDDRIVE_DEVICE=npu \
-MINDDRIVE_LATENCY_WARMUP_STEPS=0 \
-/home/ma-user/MindDrive/scripts/run_minddrive_05b_latency_offline.sh --steps 1
+"${MINDDRIVE_PYTHON}" /home/ma-user/MindDrive/scripts/benchmark_minddrive_latency_offline.py \
+  --split train \
+  --steps 55 \
+  --warmup-steps 5 \
+  --sample-pool-size 55 \
+  --start-index 0 \
+  --output-dir /home/ma-user/MindDrive/results/npu/latency_offline_train_steps55_warmup5
 ```
 
 说明：
 
 - 若缺少 `data/bench2drive` 或 `data/infos/*.pkl`，该命令现在会明确报错
 - 这是预期行为
+- 若未指定 `--output-dir`，脚本会按自动检测到的设备默认写入 `results/<device>/latency_offline_1280x704`
 
-### 16.3 稳态 3-step 测试
-
-```bash
-MINDDRIVE_DEVICE=npu \
-/home/ma-user/MindDrive/scripts/run_minddrive_05b_latency_offline.sh \
-  --steps 3 \
-  --warmup-steps 1 \
-  --output-dir /home/ma-user/MindDrive/results_latency_offline_1280x704_steps3
-```
-
-### 16.4 查看结果
+### 16.3 查看结果
 
 ```bash
-cat /home/ma-user/MindDrive/results_latency_offline_1280x704_steps3/combined_summary.json
+cat /home/ma-user/MindDrive/results/npu/latency_offline_train_steps55_warmup5/combined_summary.json
 ```
