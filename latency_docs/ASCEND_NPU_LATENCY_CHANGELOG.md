@@ -563,7 +563,50 @@ MINDDRIVE_DEVICE=npu \
 
 这是一项有意的约束，目的是避免得到不具备实际意义的 latency 结果
 
-### 15.4 建议下一步
+### 15.4 为什么 CARLA 在 910B 上无法直接跑起来
+
+在继续推进 closed-loop CARLA 路径时，已经定位到一个**架构级阻塞**，这不是简单的 Python 依赖缺失问题。
+
+实际检查结果：
+
+- 当前服务器架构是 `aarch64`
+- 也就是 ARM64 平台，而不是常见的 `x86_64`
+- 官方下载的 `CARLA 0.9.15` Linux 包位于 `/cache/carla`
+- 其中 simulator 二进制 `CarlaUE4-Linux-Shipping` 被确认是 `x86-64`
+- 其中 PythonAPI 发行件也只有：
+  - `carla-0.9.15-cp37-cp37m-manylinux_2_27_x86_64.whl`
+  - `carla-0.9.15-py3.7-linux-x86_64.egg`
+
+这意味着：
+
+- 即使单独新建 `python 3.7` 环境，也只能解决 Python 小版本匹配问题
+- 仍然无法解决 `x86_64` 二进制无法在 `aarch64` 主机上加载和运行的问题
+- 因此官方 `CARLA 0.9.15` 的 simulator 和 PythonAPI 都不能在当前 Ascend 910B 服务器上直接使用
+
+这次排查中已经实际验证过的现象包括：
+
+- 闭环 preflight 检查脚本已经能正确定位 `CARLA_ROOT`、`PythonAPI`、`agents` 目录
+- 但 `import carla` 仍然无法在当前环境中成立
+- 在独立的 `python 3.7` 环境中尝试安装官方 wheel 时，会因为平台不是 `x86_64` 而直接报 `not a supported wheel on this platform`
+
+因此当前结论是：
+
+- **offline latency on NPU** 已经打通
+- **closed-loop CARLA on official binary** 在当前 910B ARM 服务器上不可直接实现
+
+如果后续必须继续推进 closed-loop CARLA，有且仅有以下几类现实路线：
+
+1. 使用 `x86_64` 机器运行官方 CARLA + leaderboard + agent
+2. 尝试为 `aarch64` 自行编译 CARLA simulator 与 PythonAPI
+3. 采用异构部署：`x86_64` 机器跑 CARLA，NPU 机器跑模型服务
+
+其中：
+
+- 路线 1 风险最低
+- 路线 2 工作量最大且风险最高
+- 路线 3 需要额外做 RPC / 服务化改造
+
+### 15.5 建议下一步
 
 后续建议按以下顺序继续：
 
@@ -571,7 +614,8 @@ MINDDRIVE_DEVICE=npu \
 2. 在真实数据齐备后运行新的 real-data offline latency benchmark
 3. 将 `mmcv/utils/fp16_utils.py` 改为 device-aware autocast
 4. 清理与 NPU 无关的旧路径硬编码和遗留 warning
-5. 视需要补充 closed-loop CARLA on NPU 的正式验证
+5. 若要继续 closed-loop，优先迁移到 `x86_64` 机器验证官方 CARLA 路径
+6. 仅在确有必要时，再评估 `aarch64` 上自编译 CARLA 或异构部署方案
 
 ## 16. 一键复现命令
 
