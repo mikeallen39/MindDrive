@@ -161,7 +161,14 @@ num_gpus = 32
 batch_size = 4
 num_iters_per_epoch = 234769 // (num_gpus * batch_size)
 num_epochs = 6
-llm_path = './Bench2DriveZoo/ckpts/llava-qwen2.5-3b'
+REPO_ROOT = __import__('os').environ.get(
+    'MINDDRIVE_ROOT',
+    __import__('os').getcwd(),
+)
+llm_path = __import__('os').environ.get(
+    'MINDDRIVE_LLM_PATH',
+    REPO_ROOT + '/ckpts/llava-qwen2.5-3b',
+)
 use_gen_token = True
 use_col_loss = True
 collect_keys = ['lidar2img', 'cam_intrinsic', 'timestamp', 'ego_pose', 'ego_pose_inv', 'command']

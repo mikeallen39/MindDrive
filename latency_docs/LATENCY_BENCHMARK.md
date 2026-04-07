@@ -213,6 +213,204 @@ The main latency summary file is:
 
 - `Bench2Drive/eval_minddrive_05b_latency_1280x704/latency_summary.json`
 
+## Offline Pipeline Types
+
+The offline latency path does not use every prompt style that appears in
+training or validation configs. MindDrive currently contains several prompt /
+pipeline variants, and they are not interchangeable for latency measurement.
+
+### 1. `planning` pipeline
+
+Typical pipeline node:
+
+- `LoadAnnoatationMixCriticalVQATest(load_type=["planning"], desc_qa=False, use_gen_token=True, single=True, ...)`
+
+What it does:
+
+- builds a planning-only prompt
+- asks the model to generate ego future waypoints
+- keeps the offline benchmark aligned with the control/planning path that
+  matters for latency
+
+Input / output characteristics:
+
+- one stitched conversation round for planning
+- one image placeholder is expected in the final prompt
+- one image feature tensor is enough for the sample
+- output is planning-related text / waypoint token generation
+
+This is the pipeline used by the working `0.5B` offline latency benchmark and
+is also the correct choice for `3B` offline latency.
+
+### 2. `critical_qa` pipeline
+
+Typical pipeline node:
+
+- `LoadAnnoatationMixCriticalVQATest(load_type=["critical_qa"], desc_qa=True, ...)`
+
+What it does:
+
+- asks scene understanding questions
+- emphasizes critical objects, descriptions, and reasoning-oriented answers
+
+Input / output characteristics:
+
+- produces descriptive VQA rounds instead of planning-only generation
+- is suitable for richer evaluation / debugging, not for the minimal latency
+  path
+
+### 3. `with_history_vqa=True`
+
+When this flag is enabled, the pipeline appends extra history-oriented
+questions, such as:
+
+- previous-frame object changes
+- traffic light changes
+- speed changes
+- previous behavior
+
+This is useful for richer conversational evaluation, but it increases the
+number of prompt rounds.
+
+### 4. `single=True`
+
+This flag changes how image placeholders are inserted.
+
+For `LoadAnnoatationMixCriticalVQATest` with `use_gen_token=True`, the current
+implementation adds `DEFAULT_IMAGE_TOKEN` to every human turn when
+`single=True`.
+
+That means:
+
+- one planning-only round still works
+- multiple stitched VQA rounds will introduce multiple image placeholders
+
+The offline latency benchmark only passes one image feature tensor for each
+sample, so a multi-round prompt with multiple image placeholders will break the
+multimodal alignment logic.
+
+## Why `0.5B` Worked But `3B` Failed Initially
+
+The failure was caused by config mismatch, not by NPU and not by model size
+alone.
+
+`0.5B` latency inherits a planning-only test pipeline:
+
+- `load_type=["planning"]`
+- `desc_qa=False`
+- `single=True`
+
+This produces a single planning prompt and only one image placeholder, which
+matches the one image feature tensor passed into the LLaVA-style multimodal
+stack.
+
+The original `3B` latency config inherited the wrong test pipeline from
+`minddrive_qwen25_3B_infer.py`:
+
+- `load_type=["critical_qa"]`
+- `desc_qa=True`
+- `with_history_vqa=True`
+- `single=True`
+
+That combination stitched multiple human turns into one conversation and added
+multiple image placeholders, while the benchmark still supplied only one image
+feature tensor. During generation, `prepare_inputs_labels_for_multimodal()`
+tried to consume image feature `1` while only feature `0` existed, causing:
+
+- `IndexError: index 1 is out of bounds for dimension 0 with size 1`
+
+The offline latency benchmark now explicitly prefers
+`cfg.inference_only_pipeline` when that pipeline is available, so the `3B`
+latency path also follows the same planning-only prompt construction as `0.5B`
+and matches the benchmark's single-image-feature assumption.
+
+## `3B` NPU Stability Adaptation
+
+The `3B` offline latency path required one more runtime adaptation on Ascend
+NPU beyond the prompt-pipeline fix above.
+
+### Why a second adaptation was needed
+
+With the corrected planning-only pipeline, the first `3B` inference step could
+already finish on NPU. However, a multi-step benchmark still failed on the
+second step with an Ascend runtime allocation error.
+
+The key observation was:
+
+- the first step completed successfully
+- after that step, NPU reserved memory stayed around the high-water mark
+- the next step tried to allocate another large temporary block and failed
+
+This was not caused by prompt mismatch anymore. It was a step-to-step memory
+retention problem in the offline benchmark loop.
+
+### What the benchmark now does
+
+The offline benchmark script now supports two runtime controls:
+
+- `--release-cache-per-step`
+- `--print-step`
+
+`--release-cache-per-step` performs explicit cleanup after each step:
+
+- delete step-local outputs
+- delete the moved device batch
+- run Python GC
+- call `torch.npu.empty_cache()` on NPU
+
+This keeps the benchmark stable for multi-step `3B` runs on Ascend without
+changing model semantics.
+
+`--print-step` prints one concise line per step so long runs can be monitored
+in real time.
+
+### Practical implication
+
+For `3B` on Ascend NPU:
+
+- `system_latency` should be run with per-step cache release enabled
+- `pure_inference_latency` should also keep the same cleanup policy for
+  consistency across long runs
+
+Without this explicit cleanup, a single-step smoke test can pass while a real
+latency benchmark still fails on step 2.
+
+## `3B` Formal Offline Result On Ascend NPU
+
+The formal `3B` offline benchmark was run with:
+
+- real Bench2Drive train samples
+- `5` warmup steps
+- `50` measured steps
+- input resolution `1280 x 704`
+- config `adzoo/minddrive/configs/minddrive_qwen25_3B_latency.py`
+- checkpoint `/cache/minddrive_ckpts/minddrive_3b_rltrain.pth`
+- LLM base `/cache/minddrive_ckpts/llava-qwen2.5-3b`
+
+Result directory:
+
+- `results/npu/latency_offline_3b_train_steps55_warmup5/`
+
+Measured summary:
+
+- `system_latency.e2e_ms.mean = 1456.578`
+- `system_latency.model_ms.mean = 710.052`
+- `system_latency.prepare_ms.mean = 746.158`
+- `pure_inference_latency.e2e_ms.mean = 717.734`
+- `pure_inference_latency.model_ms.mean = 711.694`
+- `pure_inference_latency.prepare_ms.mean = 5.682`
+- both modes passed `basic_sanity = 50 / 50`
+- both modes passed `gt_reasonableness = 49 / 50`
+
+Interpretation:
+
+- steady-state `3B` model forward on Ascend NPU is about `711ms`
+- the gap between `system_latency` and `pure_inference_latency` mainly comes
+  from sample loading, collation, and device transfer
+- the first warmup step is much slower than steady-state because it includes
+  one-time runtime initialization / compilation cost and should not be used as
+  the representative latency number
+
 ## Recommended Reporting
 
 If the target is a serious latency comparison, report both:
@@ -231,12 +429,14 @@ At minimum include:
 
 ## Validation Status
 
-The current latency path has been smoke-checked for:
+The current latency path has been validated for:
 
-- shell syntax of both launcher scripts
 - config import
-- agent import under the project environment
+- real-data offline dataset construction
+- `0.5B` offline latency benchmark
+- `3B` offline latency benchmark on Ascend NPU
+- long-run multi-step stability with explicit per-step cache release
 
-It has not yet been reworked into a standalone offline microbenchmark. The
-current path is still based on the Bench2Drive closed-loop evaluation loop, with
-latency collection added on top.
+The current recommended path for NPU latency work is the standalone offline
+microbenchmark in `scripts/benchmark_minddrive_latency_offline.py`, not the old
+closed-loop CARLA evaluation loop.

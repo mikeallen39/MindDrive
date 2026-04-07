@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import gc
 import importlib
 import json
 import os
@@ -92,6 +93,8 @@ def parse_args():
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=704)
+    parser.add_argument("--release-cache-per-step", action="store_true")
+    parser.add_argument("--print-step", action="store_true")
     return parser.parse_args()
 
 
@@ -121,6 +124,22 @@ def resolve_dataset_cfg(cfg, split):
         dataset_cfg["ann_file"] = cfg.data.train.ann_file
     else:
         dataset_cfg = cfg.data[split].copy()
+    if hasattr(cfg, "inference_only_pipeline"):
+        base_pipeline = list(dataset_cfg["pipeline"])
+        inference_pipeline = list(cfg.inference_only_pipeline)
+        inference_prompt = next(
+            (step for step in inference_pipeline
+             if isinstance(step, dict) and step.get("type") == "LoadAnnoatationMixCriticalVQATest"),
+            None,
+        )
+        if inference_prompt is not None:
+            merged_pipeline = []
+            for step in base_pipeline:
+                if isinstance(step, dict) and step.get("type") == "LoadAnnoatationMixCriticalVQATest":
+                    merged_pipeline.append(inference_prompt)
+                else:
+                    merged_pipeline.append(step)
+            dataset_cfg["pipeline"] = merged_pipeline
     dataset_cfg["test_mode"] = True
     dataset_cfg["filter_empty_gt"] = False
     return dataset_cfg
@@ -477,6 +496,33 @@ def run_mode(mode_name, args, dataset, model, device, iteration_indices, sample_
                 "e2e_ms": round((post_end - step_start) * 1000.0, 3),
                 "sanity": sanity,
             }
+
+            if args.print_step:
+                status = "warmup" if step < args.warmup_steps else "measure"
+                print(
+                    (
+                        f"[{mode_name}] step={step + 1}/{len(iteration_indices)} "
+                        f"status={status} sample_index={sample_index} "
+                        f"prepare_ms={records[str(step)]['prepare_ms']:.3f} "
+                        f"model_ms={records[str(step)]['model_ms']:.3f} "
+                        f"e2e_ms={records[str(step)]['e2e_ms']:.3f} "
+                        f"basic_ok={sanity['basic_sanity_ok']} "
+                        f"gt_ok={sanity['gt_reasonableness_ok']}"
+                    ),
+                    flush=True,
+                )
+
+            del outputs
+            del batch_device
+            if cached_batches is None:
+                del sample
+            if args.release_cache_per_step:
+                gc.collect()
+                if device == "npu" and hasattr(torch, "npu"):
+                    torch.npu.empty_cache()
+                elif device == "cuda" and torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                device_sync(device)
 
     wall_end = time.perf_counter()
     summary = summarize_run(

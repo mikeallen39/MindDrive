@@ -2874,6 +2874,17 @@ class LoadAnnoatationMixCriticalVQATest(LoadAnnoatationCriticalVQATest):
             self.tokenizer.pad_token = self.tokenizer.unk_token
     
         self.SPEED_SPT = ['<maintain_moderate_speed>','<stop>','<maintain_slow_speed>','<speed_up>','<slow_down>','<maintain_fast_speed>','<slow_down_rapidly>']
+        self.history_critical_object_template = list(self.critical_object_template)
+        self.traffic_light_change_template = [
+            "How has the traffic light state changed compared to the previous frames?",
+            "Describe any traffic light changes that happened across the recent frames.",
+            "Compared with the previous frames, what changed about the traffic lights in the scene?",
+        ]
+        self.current_traffic_template = [
+            "What is the current traffic light status that the ego vehicle should pay attention to?",
+            "Describe the current traffic light condition relevant to the ego vehicle.",
+            "Which traffic light signal is currently affecting the ego vehicle?",
+        ]
 
     def __call__(self, results):
 
@@ -2882,7 +2893,7 @@ class LoadAnnoatationMixCriticalVQATest(LoadAnnoatationCriticalVQATest):
 
         if self.with_history_vqa:
   
-            scene_change_obj = str(random.choice(critical_obj_sentences))
+            scene_change_obj = str(random.choice(self.history_critical_object_template))
             sources.append([
                                 {"from": 'human',
                                 "value": scene_change_obj},
@@ -2890,7 +2901,7 @@ class LoadAnnoatationMixCriticalVQATest(LoadAnnoatationCriticalVQATest):
                                 "value": ""}
                                 ]
                                 )
-            light_change = str(random.choice(traffic_light_sentences))
+            light_change = str(random.choice(self.traffic_light_change_template))
             sources.append([
                                 {"from": 'human',
                                 "value": light_change},
@@ -2914,7 +2925,7 @@ class LoadAnnoatationMixCriticalVQATest(LoadAnnoatationCriticalVQATest):
                                 "value": ""}
                                 ]
                     )
-            current_light_qa = str(random.choice(current_traffic_template))
+            current_light_qa = str(random.choice(self.current_traffic_template))
             sources.append([
                                 {"from": 'human',
                                 "value": current_light_qa},
