@@ -64,19 +64,13 @@
 
 ## 2. 先说结论
 
-当前 `Curious-VLA` 比 `MindDrive` 慢很多，核心原因不只是“模型更大”。
+在这套当前链路下，`Curious-VLA` 明显慢于 `MindDrive`，主因也不应被简单概括成“模型更大”。更准确地说，当前测到的差距主要来自两者在线推理接口的设计不同。
 
-更关键的原因是：
+更关键的点是：
 
-1. `Curious-VLA` 当前走的是长上下文、多模态、自回归文本生成路径。
-2. `MindDrive` 当前 latency 主路径更接近一次前向直接输出轨迹 / 控制。
-3. 两边 benchmark 口径并不一致，`MindDrive` 有一条明显更偏 pure inference 的测法，而 `Curious-VLA` 当前主要是 planning / service 响应口径。
-4. `Curious-VLA` 的输出目标比 `MindDrive` 重得多，不只是预测轨迹，还要生成完整 JSON 结构和解释文本。
-
-因此：
-
-- 即便两者都用 `3B` 级别模型，`Curious-VLA` 也大概率仍会显著慢于 `MindDrive`
-- 模型规模只是原因之一，不是主要原因
+1. `Curious-VLA` 当前测的是一条完整的 autoregressive planning 路径。模型需要把 `critical_objects`、`explanation`、`meta_behaviour` 和 `future_trajectory` 作为显式输出逐 token 生成出来。
+2. `MindDrive` 当前最快的 latency 路径，并不是同等规模的长文本 planner。它更接近“短决策接口 + 轨迹 head / 动作解码”的推理链路，其中大量语义成本留在 hidden state、special token 和数值轨迹头内部，而不是展开成长文本输出。
+3. 因此，当前这组数字比较的，本质上不是“两个 3B VLM 谁前向更快”，而是“decision-conditioned trajectory decoding” 与 “reasoning-visible structured generation” 两种在线接口谁更重。
 
 ## 3. 两个项目的定位差异
 
@@ -399,8 +393,8 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [minddrive_b2d_agent.py](/home/ma-user/MindDrive/team_code/minddrive_b2d_agent.py#L506)
-- [minddrive_b2d_agent.py](/home/ma-user/MindDrive/team_code/minddrive_b2d_agent.py#L512)
+- [minddrive_b2d_agent.py](https://github.com/mikeallen39/MindDrive/blob/main/team_code/minddrive_b2d_agent.py#L506)
+- [minddrive_b2d_agent.py](https://github.com/mikeallen39/MindDrive/blob/main/team_code/minddrive_b2d_agent.py#L512)
 
 这条路径的重要特征是：
 
@@ -420,11 +414,6 @@ Curious-VLA 的 RL 则更像：
 5. 解析 JSON
 6. 提取 `future_trajectory`
 7. 反归一化为最终 `Trajectory`
-
-参考：
-
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L611)
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L741)
 
 这条路径的重要特征是：
 
@@ -472,7 +461,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [minddrive_b2d_agent.py](/home/ma-user/MindDrive/team_code/minddrive_b2d_agent.py#L445)
+- [minddrive_b2d_agent.py](https://github.com/mikeallen39/MindDrive/blob/main/team_code/minddrive_b2d_agent.py#L445)
 
 所以它确实是多视角。
 
@@ -486,7 +475,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [minddrive_qwen25_3B_infer.py](/home/ma-user/MindDrive/adzoo/minddrive/configs/minddrive_qwen25_3B_infer.py#L152)
+- [minddrive_qwen25_3B_infer.py](https://github.com/mikeallen39/MindDrive/blob/main/adzoo/minddrive/configs/minddrive_qwen25_3B_infer.py#L152)
 
 因此，MindDrive 当前更接近：
 
@@ -512,7 +501,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [navsim_qwen_norm_agent_cot.py](/home/ma-user/curious_vla/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L69)
+- [navsim_qwen_norm_agent_cot.py](https://github.com/mikeallen39/curious_vla/blob/main/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L69)
 
 但关键在于：
 
@@ -525,7 +514,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [navsim_qwen_norm_agent_cot.py](/home/ma-user/curious_vla/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L93)
+- [navsim_qwen_norm_agent_cot.py](https://github.com/mikeallen39/curious_vla/blob/main/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L93)
 
 当前公开 prompt 也和这个设计是对齐的，它明确写的是：
 
@@ -534,7 +523,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [run_vllm_semantic_validation.py](/home/ma-user/curious_vla/local/run_vllm_semantic_validation.py#L251)
+- [run_vllm_semantic_validation.py](https://github.com/mikeallen39/curious_vla/blob/main/local/run_vllm_semantic_validation.py#L251)
 
 连训练数据文档也在强调：
 
@@ -542,7 +531,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [train_grpo.md](/home/ma-user/curious_vla/docs/train_grpo.md#L75)
+- [train_grpo.md](https://github.com/mikeallen39/curious_vla/blob/main/docs/train_grpo.md#L75)
 
 所以，从当前公开仓库能直接确认的默认路径看，Curious-VLA 更接近：
 
@@ -624,7 +613,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [ASCEND_NPU_LATENCY_CHANGELOG.md](./ASCEND_NPU_LATENCY_CHANGELOG.md)
+- [ASCEND_NPU_LATENCY_CHANGELOG.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/ASCEND_NPU_LATENCY_CHANGELOG.md)
 
 ### 6.7 Curious-VLA 的 1280x704 会显著推高多模态上下文长度
 
@@ -640,7 +629,7 @@ Curious-VLA 的 RL 则更像：
 
 参考：
 
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1187)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L1187)
 
 另外，在当前 `transformers` 单场景 benchmark 里，实测这一条 sample 的：
 
@@ -672,7 +661,7 @@ Curious-VLA 的原始输出至少包括：
 
 参考：
 
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L743)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L743)
 
 并且当前实践已经验证过：
 
@@ -682,7 +671,7 @@ Curious-VLA 的原始输出至少包括：
 
 参考：
 
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L703)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L703)
 
 这意味着：
 
@@ -707,7 +696,7 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 
 参考：
 
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L937)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L937)
 
 这说明在进入语言侧之前，MindDrive 已经把大部分视觉信息压成了一段相对固定长度的视觉 token / embedding 序列。
 
@@ -716,7 +705,7 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 - 这一轮的问题是：
   - `What actions should the car be taking?`
 - 真实可读 prompt 见：
-  - [MINDDRIVE_REAL_INFERENCE_CASE.md](/home/ma-user/MindDrive/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L100)
+  - [MINDDRIVE_REAL_INFERENCE_CASE.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L100)
 
 如果只按裸文本分词，当前样例中：
 
@@ -731,8 +720,8 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 
 参考：
 
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L956)
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L978)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L956)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L978)
 
 当前样例对应的 speed token 是：
 
@@ -748,7 +737,7 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 
 参考：
 
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L981)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L981)
 
 所以更准确地说：
 
@@ -771,7 +760,7 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 
 参考：
 
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L89)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L89)
 
 在 dataset 侧，`ego_fut_cmd` 是通过 `command2hot()` 由当前帧的 `command_near` 转成 one-hot：
 
@@ -780,8 +769,8 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 
 参考：
 
-- [B2D_minddrive_Dataset.py](/home/ma-user/MindDrive/mmcv/datasets/B2D_minddrive_Dataset.py#L500)
-- [B2D_minddrive_Dataset.py](/home/ma-user/MindDrive/mmcv/datasets/B2D_minddrive_Dataset.py#L504)
+- [B2D_minddrive_Dataset.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/datasets/B2D_minddrive_Dataset.py#L500)
+- [B2D_minddrive_Dataset.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/datasets/B2D_minddrive_Dataset.py#L504)
 
 例如：
 
@@ -802,7 +791,7 @@ lanefollow
 
 参考：
 
-- [formating.py](/home/ma-user/MindDrive/mmcv/datasets/pipelines/formating.py#L693)
+- [formating.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/datasets/pipelines/formating.py#L693)
 
 因此在当前 planning-only benchmark 中：
 
@@ -818,7 +807,7 @@ lanefollow
 - 第二轮的问题是：
   - `Based on the above information, please provide a safe, executable, and reasonable planning trajectory for the ego car.`
 - 真实可读 prompt 见：
-  - [MINDDRIVE_REAL_INFERENCE_CASE.md](/home/ma-user/MindDrive/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L102)
+  - [MINDDRIVE_REAL_INFERENCE_CASE.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L102)
 
 按当前 tokenizer 统计：
 
@@ -843,7 +832,7 @@ lanefollow
 
 参考：
 
-- [transforms_3d.py](/home/ma-user/MindDrive/mmcv/datasets/pipelines/transforms_3d.py#L2959)
+- [transforms_3d.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/datasets/pipelines/transforms_3d.py#L2959)
 
 后续模型不是去 decode 一大段自然语言轨迹，而是：
 
@@ -854,8 +843,8 @@ lanefollow
 
 参考：
 
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L1020)
-- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L1088)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L1020)
+- [minddrive.py](https://github.com/mikeallen39/MindDrive/blob/main/mmcv/models/detectors/minddrive.py#L1088)
 
 因此当前 planning-only benchmark 的最终结果主体是：
 
@@ -872,7 +861,7 @@ lanefollow
 
 参考：
 
-- [MINDDRIVE_REAL_INFERENCE_CASE.md](/home/ma-user/MindDrive/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L158)
+- [MINDDRIVE_REAL_INFERENCE_CASE.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L158)
 
 所以如果从“真正发生了多少自回归文本生成”这个角度看，MindDrive 当前主 latency 路径的结论很明确：
 
@@ -893,7 +882,7 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [navsim_qwen_norm_agent_cot.py](/home/ma-user/curious_vla/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L174)
+- [navsim_qwen_norm_agent_cot.py](https://github.com/mikeallen39/curious_vla/blob/main/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L174)
 
 按当前真实样例重建后：
 
@@ -913,7 +902,7 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [CURIOUS_VLA_VS_MINDDRIVE_LATENCY_ANALYSIS.md](/home/ma-user/MindDrive/latency_docs/CURIOUS_VLA_VS_MINDDRIVE_LATENCY_ANALYSIS.md#L524)
+- [CURIOUS_VLA_VS_MINDDRIVE_LATENCY_ANALYSIS.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/CURIOUS_VLA_VS_MINDDRIVE_LATENCY_ANALYSIS.md#L524)
 
 这条真实失败样例的原始输出文本如果按 tokenizer 统计，总长度约为：
 
@@ -977,7 +966,7 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1484)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L1484)
 
 这说明：
 
@@ -1010,7 +999,7 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md](/home/ma-user/MindDrive/latency_docs/TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md#L66)
+- [ASCEND_NPU_LATENCY_CHANGELOG.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/ASCEND_NPU_LATENCY_CHANGELOG.md#L1003)
 
 ### 8.2 Curious-VLA 当前更偏 planning latency / service latency
 
@@ -1023,7 +1012,7 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L833)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L833)
 
 所以不能把：
 
@@ -1147,8 +1136,8 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md](/home/ma-user/MindDrive/latency_docs/TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md#L66)
-- [TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md](/home/ma-user/MindDrive/latency_docs/TRAIN_MULTISTEP_LATENCY_REPORT_2026-04-07.md#L43)
+- [ASCEND_NPU_LATENCY_CHANGELOG.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/ASCEND_NPU_LATENCY_CHANGELOG.md#L1003)
+- [ASCEND_NPU_LATENCY_CHANGELOG.md](https://github.com/mikeallen39/MindDrive/blob/main/latency_docs/ASCEND_NPU_LATENCY_CHANGELOG.md#L984)
 
 ### 9.2 Curious-VLA
 
@@ -1162,8 +1151,8 @@ Curious-VLA 的当前 planning 路径则完全不同。
 
 参考：
 
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1079)
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1165)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L1079)
+- [npu_adaptation_summary.md](https://github.com/mikeallen39/curious_vla/blob/main/latency_docs/npu_adaptation_summary.md#L1165)
 
 ## 10. 一个重要补充：论文目标和当前 benchmark 目标并不完全重合
 
