@@ -263,6 +263,105 @@ Curious-VLA 的 RL 则更像：
 
 这不是偶然，而是和它作为 autoregressive reasoning-based planner 的整体思路一致。
 
+### 4.7 放回整个 VLA 文献脉络里看，两者其实站在不同的“推理接口谱系”上
+
+如果只把 `MindDrive` 和 `Curious-VLA` 两篇论文孤立开来看，容易把差异理解成：
+
+- 一个模型小，一个模型大
+- 一个工程更轻，一个工程更重
+
+但把它们放回近两年的自动驾驶 VLA 文献里，差异会更清楚。
+
+`A Survey on Vision-Language-Action Models for Autonomous Driving` 明确提到，这个方向正在从早期偏解释型的 VLM4AD，演进到更强调闭环决策与生成的 `reasoning-centric VLA`；同时，survey 也把 `real-time efficiency` 单独列为核心开放问题之一。也就是说：
+
+- “语言是否进入在线控制链”
+- “语言是中间隐变量，还是最终 planner 接口的一部分”
+- “解释和动作是在 hidden state 里耦合，还是在输出面显式展开”
+
+这些不是工程细节，而是当前 VLA4AD 方法学分化的主轴。
+
+从这个视角看，`MindDrive` 更接近“language as action interface / reasoning-to-action bridge” 这一侧。
+
+原因是：
+
+1. 它保留了明确的 `Decision Expert -> Action Expert` 分工。
+2. 论文把高层语言决策定义为 `meta-action`，并让 `Action Expert` 去建立 language-to-action mapping。
+3. 在线 RL 的优化重点，也放在如何通过动作回报修正这层高层决策。
+
+这条路线和 `ORION` 很接近。`ORION` 论文明确指出，现有 VLM 驾驶方法的关键困难之一，是“semantic reasoning space”和“purely numerical trajectory output”之间存在 gap，因此它采用的是：
+
+- LLM 负责 driving scenario reasoning
+- generative planner 负责 precision trajectory prediction
+
+`MindDrive` 虽然具体实现不是直接照搬 `ORION`，但论文层面的推理对象很相似：
+
+- 先把语言当成高层动作语义接口
+- 再把它投影/解码成连续轨迹
+
+因此，`MindDrive` 的在线推理本质上更像：
+
+- 先做一个短而离散的决策选择
+- 再由动作侧模块把这个决策落实成轨迹
+
+也就是说，它把“可解释语义”更多保留在中间接口层，而不是要求最终对外输出一整段长规划回答。
+
+相对地，`Curious-VLA` 明确站在另一条谱系上。论文第 2 节直接把现有 driving VLA 分成两类：
+
+- `VLA-Planner`：VLM 负责语义推理，外接 planner 负责连续轨迹
+- `VLA-Token`：把轨迹规划本身视为序列生成任务，由解码器直接输出 trajectory/action token
+
+而论文明确写到：
+
+- `Curious-VLA follows VLA-Token`
+
+这点非常关键。因为这意味着 Curious-VLA 在方法论上就不是“先 reasoning，再交给外部 planner”的思路，而是：
+
+- 让生成器自己同时承担 reasoning 与 planning 的可学习输出职责
+
+这又和 `AutoVLA` 更接近。`AutoVLA` 论文摘要直接说，它要做的是：
+
+- `unifies reasoning and action generation within a single autoregressive generation model`
+
+并且它专门设计：
+
+- `fast thinking (trajectory-only)`
+- `slow thinking (enhanced with CoT reasoning)`
+
+从大类上说，`Curious-VLA` 与 `AutoVLA` 都属于“把 action/planning 拉回到 autoregressive generation 主干里”的路线；但两者又有一个重要差别：
+
+- `AutoVLA` 试图把连续轨迹进一步 tokenization 成离散 feasible actions，并显式保留 fast/slow 双模式
+- `Curious-VLA` 当前论文与公开实现更偏 `text waypoint + structured CoT` 路线，也就是把 `critical object -> explanation -> meta-behavior -> trajectory` 这条链显式摊开
+
+这就导致它在在线推理时，语言不只是一个内部条件变量，而是 planner 输出协议本身的一部分。
+
+因此，如果把这几条路线放在一张连续谱上，更准确的理解是：
+
+- `MindDrive` 更靠近“语言作为中间决策接口，轨迹由动作模块解码”
+- `ORION` 处在“语义推理 + 专门 planner”这一桥接范式
+- `Curious-VLA` 更靠近“语言就是 planner 输出协议”的自回归生成范式
+- `AutoVLA` 也属于生成式范式，但它试图进一步用 action token 和 fast mode，把在线 decode 压回更短路径
+
+这能直接解释为什么两者 latency 天然不在一个量级上比较：
+
+1. `MindDrive` 的语言主要承担“选什么决策”。
+2. `Curious-VLA` 的语言还承担“把整个规划链路展开给你看”。
+3. 前者更容易把语义成本留在 hidden state、special token、expert mapping 和轨迹 head 内部。
+4. 后者则更容易把语义成本暴露在输出面，形成真实的 token-by-token decode 开销。
+
+所以，`Curious-VLA` 比 `MindDrive` 慢，不应只理解为“3B 比 0.5B 慢”或者“vLLM 没调好”。更本质的解释是：
+
+- 两者在论文层面对“在线推理到底要生成什么”这件事，定义就不同
+
+前者更像“decision-conditioned action decoding”，后者更像“reasoning-visible structured planning generation”。
+
+本小节对应参考资料：
+
+- [MindDrive: Efficient Reinforcement Fine-Tuning for Vision-Language-Action Learning in Autonomous Driving](https://arxiv.org/abs/2512.13636)
+- [Curious-VLA: Towards Efficient Vision-Language-Action Model via Two-Stage Exploration Learning](https://arxiv.org/abs/2603.06049)
+- [A Survey on Vision-Language-Action Models for Autonomous Driving](https://openaccess.thecvf.com/content/ICCV2025W/WDFM-AD/html/Jiang_A_Survey_on_Vision-Language-Action_Models_for_Autonomous_Driving_ICCVW_2025_paper.html)
+- [ORION: A Holistic End-to-End Autonomous Driving Framework by Vision-Language Instructed Action Generation](https://openaccess.thecvf.com/content/ICCV2025/html/Fu_ORION_A_Holistic_End-to-End_Autonomous_Driving_Framework_by_Vision-Language_Instructed_ICCV_2025_paper.html)
+- [AutoVLA: Adaptive Reasoning and Reinforcement Fine-Tuning for End-to-End Autonomous Driving](https://arxiv.org/abs/2503.19755)
+
 ## 5. 最关键的区别：推理范式不同
 
 ### 5.1 MindDrive 更接近“单次前向直接出轨迹”
