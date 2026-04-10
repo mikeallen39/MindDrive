@@ -635,6 +635,63 @@ MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_a
 - 而是一个离散 speed token 选择结果
 - path command 也不是额外自由生成得到的
 
+这里需要顺手解释一下 `ego_fut_cmd` 到底是什么。
+
+`ego_fut_cmd` 本质上是数据样本自带的高层导航命令 one-hot，而不是模型在线生成出来的文本。
+
+在当前 `MindDrive` 代码里，它对应 `6` 类 path command：
+
+- `turn_left`
+- `turn_right`
+- `straight`
+- `lanefollow`
+- `change_lane_left`
+- `change_lane_right`
+
+参考：
+
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L89)
+
+在 dataset 侧，`ego_fut_cmd` 是通过 `command2hot()` 由当前帧的 `command_near` 转成 one-hot：
+
+- 若原始命令非法，则先回退到默认值
+- 然后转成长度为 `6` 的 one-hot 向量
+
+参考：
+
+- [B2D_minddrive_Dataset.py](/home/ma-user/MindDrive/mmcv/datasets/B2D_minddrive_Dataset.py#L500)
+- [B2D_minddrive_Dataset.py](/home/ma-user/MindDrive/mmcv/datasets/B2D_minddrive_Dataset.py#L504)
+
+例如：
+
+```text
+[0, 0, 0, 1, 0, 0]
+```
+
+就表示当前高层命令是：
+
+```text
+lanefollow
+```
+
+在 pipeline 打包后，它会再多套两层维度，大致变成：
+
+- 原始：`(6,)`
+- format 后：`(1, 1, 6)`
+
+参考：
+
+- [formating.py](/home/ma-user/MindDrive/mmcv/datasets/pipelines/formating.py#L693)
+
+因此在当前 planning-only benchmark 中：
+
+- speed 分量主要由 `decision_expert` 决策
+- path 分量则主要来自数据里给定的 `ego_fut_cmd`
+
+这也是为什么当前 MindDrive latency 主路径看起来会比 Curious-VLA 轻很多：
+
+- 它没有再额外为 path command 做一轮长文本自回归生成
+
 第 3 步：规划阶段
 
 - 第二轮的问题是：
