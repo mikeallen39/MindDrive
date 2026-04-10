@@ -567,6 +567,255 @@ Curious-VLA 的原始输出至少包括：
 
 - Curious-VLA 的 latency 里，有很大一部分本来就是“输出太长”带来的生成时间
 
+### 7.3 如果按“每一步到底输出什么”来拆，差异会更直观
+
+这部分不再只做抽象描述，而是直接按当前可运行代码路径拆两边的在线推理链路。
+
+#### 7.3.1 MindDrive 当前 planning-only latency 路径
+
+MindDrive 当前 offline latency benchmark 走的是 `planning-only + use_meta_action=True + use_gen_token=True` 路径。
+
+结合代码和真实样例，可以把它拆成下面几步。
+
+第 1 步：视觉编码
+
+- 多视角图像先进入视觉侧编码器
+- 然后把对象视觉特征和地图视觉特征拼起来
+- 当前代码注释里，拼接后的 `vision_embeded` 形状约为：
+  - `(1, 513, 4096)`
+
+参考：
+
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L937)
+
+这说明在进入语言侧之前，MindDrive 已经把大部分视觉信息压成了一段相对固定长度的视觉 token / embedding 序列。
+
+第 2 步：动作决策阶段
+
+- 这一轮的问题是：
+  - `What actions should the car be taking?`
+- 真实可读 prompt 见：
+  - [MINDDRIVE_REAL_INFERENCE_CASE.md](/home/ma-user/MindDrive/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L100)
+
+如果只按裸文本分词，当前样例中：
+
+- Round 1 用户 prompt 文本 token 数约为 `16`
+- 如果把 Qwen chat 包装和 assistant answer 模板一起算进去，约为 `69`
+
+这里更关键的是“输出方式”：
+
+- 它不是让模型自由生成一段动作解释文本
+- 而是通过 `decision_expert` 在 7 个 speed special token 上做分类选择
+- 最终取 `argmax(action_logits)` 得到速度动作
+
+参考：
+
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L956)
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L978)
+
+当前样例对应的 speed token 是：
+
+- `<maintain_moderate_speed>`
+
+这个 special token 在 tokenizer 中就是单 token：
+
+- `<maintain_moderate_speed>` -> `1` token
+
+而 path command 在当前路径里甚至不是再让 LLM 额外生成一段文本，而是直接从 `ego_fut_cmd` 里取当前高层命令：
+
+- `path_command = lanefollow`
+
+参考：
+
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L981)
+
+所以更准确地说：
+
+- MindDrive 第一步“输出”的不是长文本
+- 而是一个离散 speed token 选择结果
+- path command 也不是额外自由生成得到的
+
+第 3 步：规划阶段
+
+- 第二轮的问题是：
+  - `Based on the above information, please provide a safe, executable, and reasonable planning trajectory for the ego car.`
+- 真实可读 prompt 见：
+  - [MINDDRIVE_REAL_INFERENCE_CASE.md](/home/ma-user/MindDrive/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L102)
+
+按当前 tokenizer 统计：
+
+- Round 2 用户 prompt 文本 token 数约为 `31`
+- 如果把 Qwen chat 包装和 assistant answer 模板一起算进去，约为 `87`
+
+但这一步依然不是“把整条轨迹作为自由文本写出来”。
+
+当前 prompt 模板在 assistant 侧放的是两个锚点 token：
+
+- `<waypoint_ego>`
+- `<path_waypoint_ego>`
+
+对应 answer 模板文本为：
+
+- `Here is the planning trajectory <waypoint_ego> <path_waypoint_ego>`
+
+其中：
+
+- `<waypoint_ego>` -> `1` token
+- `<path_waypoint_ego>` -> `1` token
+
+参考：
+
+- [transforms_3d.py](/home/ma-user/MindDrive/mmcv/datasets/pipelines/transforms_3d.py#L2959)
+
+后续模型不是去 decode 一大段自然语言轨迹，而是：
+
+1. 从这些 waypoint 特殊 token 对应位置抽 hidden state
+2. 送入 `future_states_predict`
+3. 送入 `ego_fut_decoder / pw_ego_fut_decoder`
+4. 最后直接得到数值轨迹
+
+参考：
+
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L1020)
+- [minddrive.py](/home/ma-user/MindDrive/mmcv/models/detectors/minddrive.py#L1088)
+
+因此当前 planning-only benchmark 的最终结果主体是：
+
+- `ego_fut_preds`
+- `pw_ego_fut_preds`
+- `ego_fut_pred`
+- `pw_ego_fut_pred`
+
+而不是长文本。
+
+文档中的真实样例也已经明确写了：
+
+- `text_out = []`
+
+参考：
+
+- [MINDDRIVE_REAL_INFERENCE_CASE.md](/home/ma-user/MindDrive/latency_docs/MINDDRIVE_REAL_INFERENCE_CASE.md#L158)
+
+所以如果从“真正发生了多少自回归文本生成”这个角度看，MindDrive 当前主 latency 路径的结论很明确：
+
+- 动作阶段：本质是 special token 分类，不是自由文本生成
+- 规划阶段：本质是 waypoint-anchor hidden state -> 数值轨迹 head，不是自由文本生成
+- 最终自然语言输出：接近 `0`
+
+#### 7.3.2 Curious-VLA 当前 full-planning 路径
+
+Curious-VLA 的当前 planning 路径则完全不同。
+
+它的 prompt 会显式要求模型一步生成完整结构化回答：
+
+1. `critical_objects`
+2. `explanation`
+3. `meta_behaviour`
+4. `future_trajectory`
+
+参考：
+
+- [navsim_qwen_norm_agent_cot.py](/home/ma-user/curious_vla/navsim_eval/navsim/agents/curious_vla/navsim_qwen_norm_agent_cot.py#L174)
+
+按当前真实样例重建后：
+
+- system prompt 文本 token 数约为 `6`
+- user prompt 文本 token 数约为 `889`
+
+但真正的多模态总 prompt token 并不止这些。
+
+在先前记录过的正式 single-sample benchmark 中，实测：
+
+- `prompt_tokens = 2084`
+
+这意味着：
+
+- 文本部分约 `895`
+- 其余约 `1189` token 等价开销来自视觉 token 和多模态打包
+
+参考：
+
+- [CURIOUS_VLA_VS_MINDDRIVE_LATENCY_ANALYSIS.md](/home/ma-user/MindDrive/latency_docs/CURIOUS_VLA_VS_MINDDRIVE_LATENCY_ANALYSIS.md#L524)
+
+这条真实失败样例的原始输出文本如果按 tokenizer 统计，总长度约为：
+
+- `353` token
+
+按字段拆开，大致是：
+
+- `critical_objects`：约 `90` token
+- `explanation`：约 `57` token
+- `meta_behaviour`：约 `14` token
+- `future_trajectory`：约 `147` token
+
+也就是说，Curious-VLA 的输出里并不是只有轨迹重。
+
+事实上：
+
+- `future_trajectory` 自己已经很长
+- `critical_objects` 也不短
+- `explanation` 进一步拉长了解码长度
+
+而在另一条记录过 runtime token 统计的 planning sample 上，实测：
+
+- `generated_tokens = 366`
+
+这和上面这条真实样例分词出来的 `353` token 处于同一量级，也相互印证了：
+
+- Curious-VLA 一次 planning request 的输出，确实就是几百 token 级别的自回归生成
+
+#### 7.3.3 把两边并排看
+
+如果只看当前主 benchmark 路径，可以把两边概括成：
+
+| 维度 | MindDrive planning-only | Curious-VLA full-planning |
+| --- | --- | --- |
+| 动作阶段输出 | 7 类 speed token 上做分类，非自由文本 | 无单独动作分类头，直接进入完整结构化生成 |
+| 路径命令来源 | 直接读 `ego_fut_cmd` | 在输出里显式生成 `meta_behaviour.command` |
+| 规划阶段输出接口 | `<waypoint_ego>` / `<path_waypoint_ego>` anchor hidden state | 直接生成完整 JSON 风格回答 |
+| 最终自然语言输出 | `text_out = []` | `critical_objects + explanation + meta_behaviour + future_trajectory` |
+| 真实文本生成规模 | 接近 `0` | 约 `353 ~ 366` token |
+| 代表性 prompt 文本长度 | Round1 约 `16/69`，Round2 约 `31/87` | user prompt 文本约 `889`，实测总 prompt 约 `2084` |
+
+这张表其实已经足够解释一个核心事实：
+
+- `MindDrive` 当前 latency 主路径本质上不是“长文本 planner”
+- `Curious-VLA` 当前 latency 主路径则明确是一条“高上下文 + 长输出”的 autoregressive planner
+
+### 7.4 只砍掉 Curious-VLA 的长输出，时延就已经会明显下降
+
+这一点是目前最有力的定量证据之一。
+
+在同一套 `vllm` NPU benchmark 中：
+
+- full-planning mean request latency：`13.098643s`
+- trajectory-only mean request latency：`8.033568s`
+
+也就是：
+
+- 只把输出协议从完整规划回答压到“只输出轨迹”
+- 平均时延就下降了 `5.065075s`
+- 降幅约 `38.67%`
+
+参考：
+
+- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L1484)
+
+这说明：
+
+- 输出 token 多，确实是 Curious-VLA 慢的重要原因
+
+但同时也说明：
+
+- 即便已经去掉了 `critical_objects + explanation + meta_behaviour`
+- `trajectory-only` 仍然约 `8.03s`
+
+因此剩余的大头还包括：
+
+- 更长的多模态输入上下文
+- 更重的视觉 token 开销
+- autoregressive 生成式 planner 本身的执行范式
+
 ## 8. benchmark 口径本身也不一样
 
 ### 8.1 MindDrive 当前最快的数字来自 pure inference 口径
