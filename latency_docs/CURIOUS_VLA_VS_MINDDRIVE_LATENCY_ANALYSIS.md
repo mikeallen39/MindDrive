@@ -84,19 +84,10 @@
 
 `Curious-VLA` README 明确表明它是一个基于 `Qwen2.5-VL-3B-Instruct` 的自动驾驶 VLA 模型，强调的是多模态大模型自回归规划能力。
 
-参考：
-
-- [README.md](/home/ma-user/curious_vla/README.md#L69)
-
-当前本地 NPU 主文档里记录的模型信息：
 
 - 模型：`MashiroLn/Curious-VLA`
 - 基座：`Qwen2.5-VL-3B-Instruct`
 - 架构：`Qwen2_5_VLForConditionalGeneration`
-
-参考：
-
-- [npu_adaptation_summary.md](/home/ma-user/curious_vla/latency_docs/npu_adaptation_summary.md#L104)
 
 ### 3.2 MindDrive
 
@@ -110,23 +101,9 @@
 - `0.5B` 路线
 - `3B` 路线
 
-参考：
-
-- [README.md](/home/ma-user/MindDrive/README.md#L18)
-- [README.md](/home/ma-user/MindDrive/README.md#L27)
-- [README.md](/home/ma-user/MindDrive/README.md#L65)
 
 ## 4. 从论文本身看，两者的整体生成范式就不同
 
-这里先说明一下本节的信息来源：
-
-- `MindDrive`：本次补充基于 arXiv HTML 正文、项目 README 和代码实现
-- `Curious-VLA`：本次补充基于 arXiv HTML 正文、项目 README 和当前仓库实现
-
-因此：
-
-- 下面的比较已经不只是“摘要级理解”
-- 而是尽量从论文方法定义出发，再和当前代码形态对齐
 
 ### 4.1 先给一个总框架：两篇论文都在做 VLA，但“生成对象”不一样
 
