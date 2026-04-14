@@ -1903,6 +1903,7 @@ pw_ego_fut_pred = pw_ego_fut_preds.cumsum(dim=-2)
 代码：
 
 - `team_code/minddrive_b2d_agent.py:513`
+- `team_code/pid_controller_de.py:43`
 
 在 agent 里：
 
@@ -1917,22 +1918,289 @@ steer_traj, throttle_traj, brake_traj, metadata_traj = self.pidcontroller.contro
 )
 ```
 
-所以传入 PID 的 shape 是：
+所以传入 PID 的量是：
 
-- `out_truck`: `(6, 2)`
-- `out_truck_path`: `(20, 2)`
-- `speed`: 标量
-- `local_command_xy`: `(2,)`
+- `path_waypoint = out_truck_path = (20, 2)`
+- `speed_waypoint = out_truck = (6, 2)`
+- `speed`: 当前车速，标量
+- `target = local_command_xy = (2,)`
 
-PID 控制器最终输出：
+这里有一个非常关键的设计：
 
-- `steer`: 标量
-- `throttle`: 标量
-- `brake`: 标量
+- `(20, 2)` 的路径轨迹主要负责横向控制，也就是 `steer`
+- `(6, 2)` 的速度轨迹主要负责纵向控制，也就是 `throttle / brake`
 
-这就是最后真正发给 CARLA 的控制量。
+### 20.1 `steer` 是怎么从 `(20, 2)` 路径轨迹算出来的
 
----
+PID 不会直接拿 20 个点去拟合方向盘角度，而是先在路径轨迹上选一个“瞄准点” `aim`。
+
+代码：
+
+- `team_code/pid_controller_de.py:43`
+- `team_code/pid_controller_de.py:58`
+
+#### 20.1.1 先选瞄准点 `aim`
+
+控制器会遍历：
+
+- 每个路径点 `path_waypoint[i]`
+- 每对相邻路径点的中点 `midpoint`
+
+然后找出：
+
+- 距离当前车最近似于 `aim_dist = 3.5` 米
+
+的那个点，作为 `aim`。
+
+代码：
+
+```python
+if abs(self.aim_dist - best_norm) > abs(self.aim_dist - norm):
+    aim = path_waypoint[i]
+...
+if abs(self.aim_dist - best_norm) > abs(self.aim_dist - norm):
+    aim = midpoint
+```
+
+代码位置：
+
+- `team_code/pid_controller_de.py:48`
+- `team_code/pid_controller_de.py:57`
+
+所以 `aim` 的作用可以理解为：
+
+- 不是盯着终点开
+- 而是在前方 3.5 米左右找一个即时跟踪目标点
+
+#### 20.1.2 把 `aim` 变成方向误差 `angle`
+
+选出 `aim` 之后，会把它变成一个归一化转向误差：
+
+```python
+angle = np.degrees(np.pi/2 - np.arctan2(aim[1], aim[0])) / 90
+```
+
+代码：
+
+- `team_code/pid_controller_de.py:65`
+
+直观理解：
+
+- 如果 `aim` 正前方，`angle` 接近 0
+- 如果 `aim` 偏左或偏右，`angle` 就对应变大或变小
+
+代码里还计算了：
+
+- `angle_last`：由最后一段路径方向得到的角度
+- `angle_target`：由局部导航点 `target` 得到的角度
+
+代码：
+
+- `team_code/pid_controller_de.py:66`
+- `team_code/pid_controller_de.py:67`
+
+但当前实现里：
+
+```python
+use_target_to_aim = False
+angle_final = angle_target if use_target_to_aim else angle
+```
+
+所以实际闭环运行时，真正用于横向控制的是：
+
+- `angle_final = angle`
+
+代码：
+
+- `team_code/pid_controller_de.py:69`
+- `team_code/pid_controller_de.py:70`
+
+#### 20.1.3 横向 PID 输出 `steer`
+
+然后把 `angle_final` 送进转向 PID：
+
+```python
+steer = np.clip(self.turn_controller.step(angle_final), -1.0, 1.0)
+```
+
+代码：
+
+- `team_code/pid_controller_de.py:72`
+
+转向 PID 的默认参数是：
+
+- `turn_KP = 1.7`
+- `turn_KI = 0.3`
+- `turn_KD = 0.6`
+
+定义在：
+
+- `team_code/pid_controller_de.py:32`
+
+所以一句话总结横向控制：
+
+- 从 `(20, 2)` 路径轨迹里找一个前方约 3.5 米的 `aim`
+- 把它变成方向误差 `angle`
+- 用横向 PID 输出 `steer`
+
+### 20.2 `desired_speed` 是怎么从 `(6, 2)` 速度轨迹算出来的
+
+纵向控制不是看 `(20, 2)` 的路径轨迹，而是看 `(6, 2)` 的速度轨迹。
+
+代码：
+
+- `team_code/pid_controller_de.py:62`
+- `team_code/pid_controller_de.py:63`
+
+具体公式是：
+
+```python
+desired_speed = 0.75 * np.linalg.norm(speed_waypoint[0]) * 2 +                 0.25 * np.linalg.norm(speed_waypoint[1] - speed_waypoint[0]) * 2
+```
+
+这里可以这样理解：
+
+- 第一项看“第一个未来点离当前有多远”
+- 第二项看“前两步之间的位移变化有多大”
+- 再做 0.75 / 0.25 的加权
+
+所以：
+
+- 如果前方速度轨迹整体很短，`desired_speed` 就小
+- 如果前方速度轨迹拉得比较开，`desired_speed` 就大
+
+它不是严格物理意义上的速度估计器，更像一个：
+
+- 基于短期未来位移的启发式目标速度估计器
+
+### 20.3 `brake` 是怎么决定的
+
+代码：
+
+- `team_code/pid_controller_de.py:73`
+
+规则是：
+
+```python
+brake = desired_speed < self.brake_speed or (speed / desired_speed) > self.brake_ratio
+```
+
+默认阈值：
+
+- `brake_speed = 0.05`
+- `brake_ratio = 1.1`
+
+定义在：
+
+- `team_code/pid_controller_de.py:32`
+
+含义是：
+
+1. 如果目标速度本来就非常小，直接刹车
+2. 如果当前速度已经明显高于目标速度，也刹车
+
+所以 `brake` 本质上是一个布尔决策，再被转成 `0/1` 使用。
+
+### 20.4 `throttle` 是怎么决定的
+
+如果不刹车，就根据当前速度和目标速度的差来给油。
+
+代码：
+
+- `team_code/pid_controller_de.py:74`
+- `team_code/pid_controller_de.py:76`
+
+先算速度误差：
+
+```python
+delta = np.clip(desired_speed - speed, 0.0, self.clip_delta)
+```
+
+其中：
+
+- `clip_delta = 0.25`
+
+也就是说，即使目标速度比当前速度高很多，也不会把误差无限放大，而是最多只让 PID 看到 `0.25`。
+
+接着：
+
+```python
+throttle = self.speed_controller.step(delta) if not brake else 0.0
+throttle = np.clip(throttle, 0.0, self.max_throttle)
+```
+
+默认参数：
+
+- `speed_KP = 5.0`
+- `speed_KI = 0.5`
+- `speed_KD = 1.0`
+- `max_throttle = 0.75`
+
+定义在：
+
+- `team_code/pid_controller_de.py:32`
+
+所以纵向控制的逻辑是：
+
+- 先根据轨迹估计 `desired_speed`
+- 如果该刹就 `brake = True, throttle = 0`
+- 否则用纵向 PID 跟踪 `desired_speed`
+
+### 20.5 agent 外面还有一层安全后处理
+
+在 `control_pid()` 返回之后，agent 还会再做几条简单规则：
+
+```python
+if brake_traj < 0.05: brake_traj = 0.0
+if throttle_traj > brake_traj: brake_traj = 0.0
+if tick_data['speed'] > 5: throttle_traj = 0
+```
+
+代码：
+
+- `team_code/minddrive_b2d_agent.py:516`
+- `team_code/minddrive_b2d_agent.py:519`
+
+这层规则的作用可以概括为：
+
+- 很小的 brake 直接清零
+- 如果同时给油和刹车，优先保留 throttle，清掉 brake
+- 当前车速已经大于 5 时，进一步限制继续给油
+
+最后才写入 CARLA 控制量：
+
+- `control.steer`
+- `control.throttle`
+- `control.brake`
+
+代码：
+
+- `team_code/minddrive_b2d_agent.py:523`
+- `team_code/minddrive_b2d_agent.py:525`
+
+### 20.6 一句话总结这段 PID 链路
+
+这段控制链路可以概括成：
+
+- `(20, 2)` 的路径轨迹负责“往哪打方向盘”
+- `(6, 2)` 的速度轨迹负责“应该开多快”
+- 横向 PID 根据路径瞄准点输出 `steer`
+- 纵向 PID 根据目标速度输出 `throttle / brake`
+
+### 20.7 一张最简控制流图
+
+```text
+pw_ego_fut_pred = (20, 2)
+-> 选前方约 3.5m 的 aim
+-> angle
+-> turn PID
+-> steer
+
+ego_fut_pred = (6, 2)
+-> desired_speed
+-> speed PID + brake rule
+-> throttle / brake
+```
 
 ## 21. 一张完整的 shape 流程图
 
