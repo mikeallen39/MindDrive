@@ -1014,6 +1014,63 @@ path_command = PATH_MAPPING.get(path_idx, '<unknown_path>')
 - `mmcv/models/detectors/minddrive.py:981`
 - `mmcv/models/detectors/minddrive.py:986`
 
+#### 15.1.2.1 `route command / ego_fut_cmd` 到底是什么
+
+这里的 `route command` 不是模型自己预测出来的，而是上游路由规划器给出的高层导航命令。
+
+在 agent 里，它来自：
+
+```python
+(_, curr_command), (near_node, near_command) = self._route_planner.run_step(pos)
+```
+
+代码：
+
+- `team_code/minddrive_b2d_agent.py:404`
+
+这个高层命令的语义是：
+
+- 当前这段路更适合 `lanefollow`
+- 还是 `straight`
+- 还是 `turn_left`
+- 还是 `turn_right`
+- 或者 `change_lane_left / change_lane_right`
+
+也就是说，它描述的是：
+
+- “路由层面，车接下来应该往哪走”
+
+然后 agent 会把这个高层命令转成两种不同表示：
+
+1. `results['command']`
+
+- 一个标量编号
+- 更适合一般数值特征输入
+
+代码：
+
+- `team_code/minddrive_b2d_agent.py:468`
+
+2. `results['ego_fut_cmd']`
+
+- 一个 one-hot 路径命令向量
+- 更适合后面在多条候选路径轨迹里做模式选择
+
+代码：
+
+- `team_code/minddrive_b2d_agent.py:469`
+
+在推理 pipeline 里，`ego_fut_cmd` 最终会被整理成：
+
+- `(1, 1, 6)`
+
+对应 6 类路径动作。
+
+所以这里可以把二者理解成：
+
+- `route command`：语义层面的高层导航命令
+- `ego_fut_cmd`：这个高层导航命令的 one-hot 数值表示
+
 所以当前闭环逻辑更准确地说是：
 
 - `decision_expert`：决定速度模式
