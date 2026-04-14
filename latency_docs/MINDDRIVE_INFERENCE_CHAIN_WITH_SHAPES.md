@@ -684,6 +684,128 @@ vlm_memory = torch.cat([vlm_memory, can_bus_embed.unsqueeze(-2)], dim=-2)
 
 这里多出来的 1 个 token，本质上是“ego/can_bus 压缩 token”。
 
+### 12.5 `can_bus_embed` 是什么
+
+这部分非常重要，因为它决定了 MindDrive 送给 LLM 的不仅是“外部场景 token”，还包含“自车状态 token”。
+
+`can_bus_embed` 定义在检测头内部，本质上是一个小 MLP：
+
+```python
+Linear(89, embed_dims * 4)
+-> ReLU
+-> Linear(embed_dims * 4, output_dims)
+```
+
+代码：
+
+- `mmcv/models/dense_heads/minddrive_head.py:446`
+- `mmcv/models/dense_heads/minddrive_head.py:454`
+
+在 0.5B 配置下：
+
+- `embed_dims = 256`
+- `output_dims = 896`
+
+所以它做的是：
+
+- 输入 `89` 维自车状态特征
+- 输出 `896` 维 ego token
+
+在 3B 配置下，它会输出：
+
+- `2048` 维 ego token
+
+#### 12.5.1 这 89 维是怎么来的
+
+代码：
+
+- `mmcv/models/dense_heads/minddrive_head.py:915`
+- `mmcv/models/dense_heads/minddrive_head.py:926`
+
+`can_bus_input` 由三部分拼起来：
+
+1. 当前帧 `rec_can_bus`
+
+```python
+rec_can_bus = torch.cat([data['command'].unsqueeze(-1), rec_can_bus], dim=-1)
+```
+
+原始 `can_bus` 是 `18` 维，再拼上当前 route command 后，变成：
+
+- `19` 维
+
+2. 历史两帧 can_bus
+
+```python
+self.memory_canbus.flatten(-2)
+```
+
+默认 `can_bus_len = 2`，每帧 `19` 维，所以这里是：
+
+- `2 * 19 = 38` 维
+
+3. 历史 ego pose 摘要
+
+```python
+memory_ego_pose.mean(-2).flatten(-2)
+```
+
+这里贡献：
+
+- `32` 维
+
+所以总输入维度就是：
+
+- `19 + 38 + 32 = 89`
+
+也就是代码注释里的：
+
+- `(1, 19+19*2+16*2)`
+
+#### 12.5.2 它在系统里起什么作用
+
+如果没有 `can_bus_embed`，LLM 主要只能看到：
+
+- 外部目标 scene tokens
+- 地图 scene tokens
+
+它对“我车当前的速度、姿态、历史状态、当前导航命令”感知会弱很多。
+
+有了 `can_bus_embed` 后，LLM 会额外拿到一个 ego token，里面压缩了：
+
+- 当前导航命令
+- 当前位姿和速度等自车状态
+- 短时历史 can_bus
+- 历史 ego pose 信息
+
+所以它可以看成一个：
+
+- “自车状态摘要 token”
+
+#### 12.5.3 为什么 token 数会从 256 变成 257
+
+在 det head 里，object scene tokens 原来是：
+
+- `(B, 256, hidden)`
+
+然后执行：
+
+```python
+vlm_memory = torch.cat([vlm_memory, can_bus_embed.unsqueeze(-2)], dim=-2)
+```
+
+于是变成：
+
+- `(B, 257, hidden)`
+
+也就是说，多出来的那 `1` 个 token，就是 `can_bus_embed`。
+
+#### 12.5.4 汇报时可以怎么讲
+
+可以直接讲成一句话：
+
+`can_bus_embed` 是一个 ego-state token encoder，它把当前命令、自车运动状态、短时历史 can_bus 和历史位姿信息压缩成一个和 LLM hidden size 对齐的向量，并作为额外 1 个 token 拼到 object scene tokens 后面；因此在 0.5B 模型里 object tokens 会从 `(1,256,896)` 变成 `(1,257,896)`。
+
 ---
 
 ## 13. 第 8 步：拼成给 LLM 的 scene tokens
@@ -858,28 +980,144 @@ self.lm_head.set_adapter("action_expert")
 ego_feature = self.lm_head.inference_waypoints(..., return_ego_feature=True)
 ```
 
-#### 核心思想
+这一段如果不仔细看代码，很容易误以为它是在“生成一串轨迹文字”。
 
-这一步不是让 LLM 自回归生成一串坐标文本。
+实际上不是。
 
-而是：
+它的真实流程是：
 
-1. 让 prompt 中包含特殊 waypoint token
-2. Qwen 前向一遍
-3. 直接取这些特殊 token 位置上的 hidden state
+1. 先把前面几轮问答 history 和最终 planning 问句拼成一个 `context_input_ids`
+2. 这个 planning 问答的 assistant 回答模板里，提前写好了特殊 token
+3. 把 scene tokens 插到 `<image>` 的位置
+4. 用 `action_expert` 跑一次 Qwen 前向
+5. 不读自然语言答案，而是直接把特殊 token 对应位置上的 hidden state 抽出来
+6. 再把这些 hidden state 交给后面的轨迹解码器
 
-在当前 decoupling 配置下，有两个特殊 token：
+#### 15.2.1 最后一轮 planning prompt 长什么样
 
-- 一个对应速度轨迹分支
-- 一个对应路径轨迹分支
+planning 问答模板是在数据 pipeline 里提前构造好的。
 
-所以抽出来的 `selected_hidden_states` 在单 batch 下，本质上是 2 个 token 的 hidden states。
+当前 decoupling 配置下，assistant 侧模板是：
 
-#### shape
+```text
+Here is the planning trajectory <waypoint_ego> <path_waypoint_ego>
+```
+
+代码：
+
+- `mmcv/datasets/pipelines/transforms_3d.py:2367`
+- `mmcv/datasets/pipelines/transforms_3d.py:2372`
+
+这两个特殊 token 的含义是：
+
+- `<waypoint_ego>`：速度轨迹分支对应的锚点 token
+- `<path_waypoint_ego>`：路径轨迹分支对应的锚点 token
+
+所以 `action_expert` 的目标不是预测完整文本，而是让这两个 token 在当前多模态上下文里得到“足够好的语义表示”。
+
+#### 15.2.2 `context_input_ids` 是怎么组成的
+
+在 `simple_test_pts()` 里，前面各轮问答会累计到：
+
+```python
+history_input_output_id.append(input_ids)
+context_input_ids = torch.cat(history_input_output_id, dim=-1)
+```
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1016`
+- `mmcv/models/detectors/minddrive.py:1017`
+
+也就是说，送进 `action_expert` 的不是单独一句 planning 问句，而是：
+
+- 前面保留的上下文问答
+- 最后一轮包含 `<waypoint_ego>` 和 `<path_waypoint_ego>` 的 planning 问答
+
+拼起来的一整段 token 序列。
+
+然后 `inference_waypoints()` 内部会再把：
+
+- 文本 token
+- `vision_embeded`
+
+一起变成多模态输入序列。
+
+代码：
+
+- `mmcv/utils/llava_qwen.py:413`
+- `mmcv/utils/llava_arch.py:49`
+
+#### 15.2.3 `action_expert` 前向后到底拿什么
+
+`inference_waypoints()` 先正常跑一遍 Qwen：
+
+```python
+outputs = self.model(...)
+hidden_states = outputs[0]
+```
+
+代码：
+
+- `mmcv/utils/llava_qwen.py:439`
+- `mmcv/utils/llava_qwen.py:452`
+
+此时：
+
+- 0.5B 下 `hidden_states` 典型是 `(1, L, 896)`
+- 3B 下 `hidden_states` 典型是 `(1, L, 2048)`
+
+这里的 `L` 是“文本 token + 513 个 scene tokens”拼起来后的总序列长度。
+
+然后关键逻辑来了。
+
+因为当前是 decoupling 模式，`self.config.waypoint_token_idx` 不是单个 token id，而是一个 list，里面有两个 id：
+
+- `<waypoint_ego>` 的 token id
+- `<path_waypoint_ego>` 的 token id
+
+`inference_waypoints()` 会在 `new_input_ids` 里把这两个 token 的位置找出来：
+
+```python
+loc_positions = torch.zeros_like(new_id).to(torch.bool)
+for token_id in self.config.waypoint_token_idx:
+    if token_id in new_id:
+        loc_positions = torch.logical_or(loc_positions, new_id == token_id)
+selected_hidden_states = hidden_states[loc_positions]
+```
+
+代码：
+
+- `mmcv/utils/llava_qwen.py:458`
+- `mmcv/utils/llava_qwen.py:467`
+
+所以它最终拿到的不是整段文本输出，而是：
+
+- 这两个 waypoint special token 各自对应的 hidden state
+
+#### 15.2.4 为什么这里能代表未来轨迹信息
+
+因为训练时，模型就是围绕这两个 special token 学的：
+
+- 多模态上下文要汇聚到 `<waypoint_ego>`
+- 多模态上下文要汇聚到 `<path_waypoint_ego>`
+
+也就是说，这两个 token 在训练中被强制承担“轨迹语义槽位”的角色。
+
+所以到了推理时，直接取这两个 token 的 hidden states，就等于取到了：
+
+- 速度轨迹分支的条件表示
+- 路径轨迹分支的条件表示
+
+#### 15.2.5 shape 到底是什么
+
+在单 batch、decoupling 模式下，一般会抽出 2 个 token 的 hidden states。
+
+所以：
 
 0.5B：
 
-- `ego_feature` 原始拉平后大致是 `(2, 896)`
+- `selected_hidden_states` 近似是 `(2, 896)`
 - reshape 后：`(1, 2, 896)`
 
 3B：
@@ -898,12 +1136,41 @@ ego_feature = ego_feature.reshape(B, -1, 896)
 ego_feature = ego_feature.reshape(B, -1, 2048)
 ```
 
-随后拆成两支：
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1031`
+- `mmcv/models/detectors/minddrive.py:1034`
+
+#### 15.2.6 为什么后面要拆成两支
+
+reshape 后：
+
+- 第 0 个 token hidden state 对应速度轨迹分支
+- 第 1 个 token hidden state 对应路径轨迹分支
+
+所以代码里会立刻拆成：
 
 - `current_states = ego_feature[:, 0].unsqueeze(1)` -> `(1, 1, 896)` 或 `(1, 1, 2048)`
 - `pw_current_states = ego_feature[:, 1].unsqueeze(1)` -> `(1, 1, 896)` 或 `(1, 1, 2048)`
 
----
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1035`
+- `mmcv/models/detectors/minddrive.py:1036`
+
+这两支后面分别进入：
+
+- `distribution_forward()` / `future_states_predict()`：速度轨迹分支
+- `pw_distribution_forward()` / `pw_future_states_predict()`：路径轨迹分支
+
+所以从系统角度看：
+
+- `action_expert` 负责输出“轨迹条件 hidden state”
+- 真正把它变成数值轨迹的是后面的 probabilistic trajectory decoder
+
+#### 15.2.7 一句话总结
+
+`action_expert` 不是在生成轨迹文本，而是在包含 `<waypoint_ego>` 和 `<path_waypoint_ego>` 的 planning 序列上做一次前向，然后把这两个 special token 位置上的 hidden states 直接抽出来，作为速度轨迹分支和路径轨迹分支的条件表示。
 
 ## 16. 第 11 步：从 LLM hidden state 到未来轨迹
 
