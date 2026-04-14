@@ -49,8 +49,10 @@ class ScenarioManager(object):
         """
         Setups up the parameters, which will be filled at load_scenario()
         """
+        self.manager = self
         self.route_index = None
         self.scenario = None
+        self.route_scenario = None
         self.scenario_tree = None
         self.ego_vehicles = None
         self.other_actors = None
@@ -112,6 +114,7 @@ class ScenarioManager(object):
         GameTime.restart()
         self.route_index = route_index
         self.scenario = scenario
+        self.route_scenario = scenario
         self.scenario_tree = scenario.scenario_tree
         self.ego_vehicles = ego_vehicles
         self.other_actors = scenario.other_actors
@@ -133,6 +136,7 @@ class ScenarioManager(object):
         self._agent_wrapper = AgentWrapperFactory.get_wrapper(agent)
         self.route_index = route_index
         self.scenario = scenario
+        self.route_scenario = scenario
         self.scenario_tree = scenario.scenario_tree
         self.ego_vehicles = scenario.ego_vehicles
         self.other_actors = scenario.other_actors

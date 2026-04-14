@@ -73,6 +73,7 @@ class MinddriveAgent(autonomous_agent.AutonomousAgent):
         self.inference_only_pipeline = pipeline
 
     def setup(self, path_to_conf_file):
+        now = datetime.datetime.now()
         self.track = autonomous_agent.Track.SENSORS
         self.steer_step = 0
         self.last_moving_status = 0

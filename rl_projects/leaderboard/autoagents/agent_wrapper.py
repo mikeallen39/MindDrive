@@ -76,8 +76,12 @@ def validate_sensor_configuration(sensors, agent_track, selected_track):
     Ensure that the sensor configuration is valid, in case the challenge mode is used
     Returns true on valid configuration, false otherwise
     """
-    if Track(selected_track) != agent_track:
-        raise SensorConfigurationInvalid("You are submitting to the wrong track [{}]!".format(Track(selected_track)))
+    selected_track_enum = Track(selected_track)
+    agent_track_value = getattr(agent_track, 'value', agent_track)
+    if selected_track_enum.value != agent_track_value:
+        raise SensorConfigurationInvalid(
+            "You are submitting to the wrong track [{}]!".format(selected_track_enum)
+        )
 
     sensor_count = {}
     sensor_ids = []
@@ -92,7 +96,7 @@ def validate_sensor_configuration(sensors, agent_track, selected_track):
             sensor_ids.append(sensor_id)
 
         # Check if the sensor is valid
-        if agent_track == Track.SENSORS:
+        if agent_track_value == Track.SENSORS.value:
             if sensor['type'].startswith('sensor.opendrive_map'):
                 raise SensorConfigurationInvalid("Illegal sensor 'sensor.opendrive_map' used for Track [{}]!".format(agent_track))
 
@@ -112,7 +116,7 @@ def validate_sensor_configuration(sensors, agent_track, selected_track):
         else:
             sensor_count[sensor['type']] = 1
 
-    if agent_track in (Track.SENSORS_QUALIFIER, Track.MAP_QUALIFIER):
+    if agent_track_value in (Track.SENSORS_QUALIFIER.value, Track.MAP_QUALIFIER.value):
         sensor_limits = QUALIFIER_SENSORS_LIMITS
     else:
         sensor_limits = SENSORS_LIMITS

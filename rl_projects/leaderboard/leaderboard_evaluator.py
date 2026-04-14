@@ -23,16 +23,16 @@ import sys
 import carla
 import signal
 
-from srunner.scenariomanager.carla_data_provider import *
+from rl_projects.scenario_runner.srunner.scenariomanager.carla_data_provider import *
 from rl_projects.scenario_runner.srunner.scenariomanager.timer import GameTime
-from srunner.scenariomanager.watchdog import Watchdog
+from rl_projects.scenario_runner.srunner.scenariomanager.watchdog import Watchdog
 
-from leaderboard.scenarios.scenario_manager import ScenarioManager
-from leaderboard.scenarios.route_scenario import RouteScenario
-from leaderboard.envs.sensor_interface import SensorConfigurationInvalid
-from leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration, TickRuntimeError
-from leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
-from leaderboard.utils.route_indexer import RouteIndexer
+from rl_projects.leaderboard.scenarios.scenario_manager import ScenarioManager
+from rl_projects.leaderboard.scenarios.route_scenario import RouteScenario
+from rl_projects.leaderboard.envs.sensor_interface import SensorConfigurationInvalid
+from rl_projects.leaderboard.autoagents.agent_wrapper import AgentError, validate_sensor_configuration, TickRuntimeError
+from rl_projects.leaderboard.utils.statistics_manager import StatisticsManager, FAILURE_MESSAGES
+from rl_projects.leaderboard.utils.route_indexer import RouteIndexer
 import atexit
 import subprocess
 import time
@@ -96,7 +96,25 @@ def find_free_port(starting_port):
 
 def get_weather_id(weather_conditions):
     from xml.etree import ElementTree as ET
-    tree = ET.parse('leaderboard/data/weather.xml')
+    candidates = []
+    bench2drive_root = os.environ.get('BENCH2DRIVE_ROOT')
+    if bench2drive_root:
+        candidates.append(os.path.join(bench2drive_root, 'leaderboard', 'data', 'weather.xml'))
+
+    repo_root = os.environ.get('MINDDRIVE_ROOT', os.getcwd())
+    candidates.extend([
+        os.path.join(repo_root, 'Bench2Drive', 'leaderboard', 'data', 'weather.xml'),
+        os.path.join(repo_root, 'leaderboard', 'data', 'weather.xml'),
+        os.path.join(repo_root, 'data', 'weather.xml'),
+    ])
+
+    weather_xml = next((path for path in candidates if os.path.exists(path)), None)
+    if weather_xml is None:
+        raise FileNotFoundError(
+            "Unable to locate weather.xml. Checked: {}".format(", ".join(candidates))
+        )
+
+    tree = ET.parse(weather_xml)
     root = tree.getroot()
     def conditions_match(weather, conditions):
         for (key, value) in weather:

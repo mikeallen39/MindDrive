@@ -9,9 +9,27 @@ export MINDDRIVE_ROOT="${ROOT_DIR}"
 export ASCEND_TOOLKIT_HOME="${ASCEND_TOOLKIT_HOME:-/usr/local/Ascend/ascend-toolkit/latest}"
 export PYTHONPATH="${ROOT_DIR}:${ROOT_DIR}/rl_projects:${ROOT_DIR}/rl_projects/scenario_runner:${ROOT_DIR}/team_code:${PYTHONPATH:-}"
 
+if [[ -z "${CUDA_HOME:-}" ]]; then
+  for candidate in \
+    "/usr/local/cuda-11.8" \
+    "/usr/local/cuda"
+  do
+    if [[ -x "${candidate}/bin/nvcc" ]]; then
+      export CUDA_HOME="${candidate}"
+      break
+    fi
+  done
+fi
+
+if [[ -n "${CUDA_HOME:-}" ]]; then
+  export PATH="${CUDA_HOME}/bin:${PATH}"
+  export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+fi
+
 if [[ -z "${CARLA_ROOT:-}" ]]; then
   for candidate in \
     "${ROOT_DIR}/carla" \
+    "${ROOT_DIR}/../carla" \
     "/cache/carla" \
     "/data/carla" \
     "/home/ma-user/work/carla" \
@@ -25,6 +43,18 @@ if [[ -z "${CARLA_ROOT:-}" ]]; then
 fi
 
 export CARLA_ROOT="${CARLA_ROOT:-${ROOT_DIR}/carla}"
+
+if [[ -z "${BENCH2DRIVE_ROOT:-}" ]]; then
+  for candidate in \
+    "${ROOT_DIR}/Bench2Drive" \
+    "${ROOT_DIR}/../Bench2Drive"
+  do
+    if [[ -d "${candidate}" ]]; then
+      export BENCH2DRIVE_ROOT="${candidate}"
+      break
+    fi
+  done
+fi
 
 ASCEND_SET_ENV_SH="${ASCEND_SET_ENV_SH:-/usr/local/Ascend/ascend-toolkit/set_env.sh}"
 if [[ -f "${ASCEND_SET_ENV_SH}" ]]; then
@@ -43,7 +73,9 @@ if [[ -d "${CARLA_ROOT}/PythonAPI" ]]; then
 fi
 
 if [[ -z "${MINDDRIVE_PYTHON:-}" ]]; then
-  if [[ -x "/home/ma-user/anaconda3/envs/minddrive-npu-latency-v2/bin/python" ]]; then
+  if [[ -x "/data/zxz/condaenv/minddrive/bin/python" ]]; then
+    export MINDDRIVE_PYTHON="/data/zxz/condaenv/minddrive/bin/python"
+  elif [[ -x "/home/ma-user/anaconda3/envs/minddrive-npu-latency-v2/bin/python" ]]; then
     export MINDDRIVE_PYTHON="/home/ma-user/anaconda3/envs/minddrive-npu-latency-v2/bin/python"
   elif [[ -x "/home/ma-user/anaconda3/envs/minddrive-npu-latency/bin/python" ]]; then
     export MINDDRIVE_PYTHON="/home/ma-user/anaconda3/envs/minddrive-npu-latency/bin/python"
