@@ -966,6 +966,66 @@ shape：
 
 这一支只决定“速度模式”，不直接产出坐标轨迹。
 
+#### 15.1.1 `decision_expert` 的输出到底拿来做什么
+
+这一步最容易误解。
+
+`decision_expert` 的输出不是再去解码一条新轨迹，而是：
+
+1. 先输出一个 7 类速度动作分布
+2. 从这 7 类里选出当前最应该执行的速度模式 `speed_value`
+3. 用这个 `speed_value` 去选择 `action_expert` 后面解码出的 7 条候选速度轨迹中的哪一条
+
+对应代码：
+
+- `mmcv/models/detectors/minddrive.py:974`
+- `mmcv/models/detectors/minddrive.py:978`
+- `mmcv/models/detectors/minddrive.py:1127`
+- `mmcv/models/detectors/minddrive.py:1141`
+
+也就是说，在当前 decoupling 实现里：
+
+- `action_expert` 后续会解出 `ego_fut_preds`，shape 是 `(1, 7, 6, 2)`
+- 这 7 条轨迹分别对应 7 种速度模式
+- `decision_expert` 的任务就是告诉系统“这 7 条里当前应该选哪一条”
+
+所以它更像一个：
+
+- “速度模式选择器”
+
+而不是：
+
+- “轨迹生成器”
+
+#### 15.1.2 为什么说它只决定速度，不决定路径
+
+当前实现里，`decision_expert` 只预测 speed action。
+
+代码里在得到 `speed_command` 之后，路径 `path_command` 不是从 `decision_expert` 再额外生成，而是直接从当前 route command 对应的 `ego_fut_cmd` 里取：
+
+```python
+std_cmd_tensors = data['ego_fut_cmd'][:, 0, 0]
+path_idx = torch.argmax(cmd_tensor).item()
+path_command = PATH_MAPPING.get(path_idx, '<unknown_path>')
+```
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:981`
+- `mmcv/models/detectors/minddrive.py:986`
+
+所以当前闭环逻辑更准确地说是：
+
+- `decision_expert`：决定速度模式
+- route command / `ego_fut_cmd`：决定路径模式
+- `action_expert`：提供轨迹条件 hidden states
+- 轨迹解码器：输出所有候选轨迹
+- 最后根据 speed/path 模式，从候选轨迹里选出当前要执行的那一条
+
+#### 15.1.3 一句话总结
+
+在当前公开实现中，`decision_expert` 的输出作用不是“生成轨迹”，而是“在 `action_expert` 解码出的多模态候选轨迹中，选出当前应该采用的速度模式对应那一条”；而路径模式则主要由 route command 决定。
+
 ### 15.2 第二次：`action_expert` 提取 waypoint hidden state
 
 代码：
@@ -1177,113 +1237,497 @@ reshape 后：
 代码：
 
 - `mmcv/models/detectors/minddrive.py:1042`
+- `mmcv/models/detectors/minddrive.py:1846`
+- `mmcv/models/detectors/minddrive.py:1965`
 
 这一层是很多人第一次看会误解的地方。
 
-LLM 不直接输出轨迹坐标，而是输出“适合解码轨迹的隐藏状态”，然后后面有专门的概率模型和轨迹头把它们解出来。
+LLM 并不直接输出最终轨迹坐标，而是先输出两个 special token 对应的 hidden state，然后这两个 hidden state 再进入一个“概率 latent + GRU 未来状态预测 + MLP 轨迹头”的规划解码器。
 
-### 16.1 模式数和时间长度
+也就是说，这一层本质上是：
 
-当前 decoupling 配置下：
+```text
+LLM hidden state
+-> 概率分布模块，得到 latent z
+-> GRU 预测未来 hidden state
+-> MLP 轨迹头
+-> 多模态候选轨迹
+```
 
-- 速度分支模式数 `ego_fut_mode = 7`
-- 路径分支模式数 `pw_ego_fut_mode = 6`
-- 速度分支时间步 `fut_ts = 6`
-- 路径分支时间步 `fut_ps = 20`
+### 16.1 这一层的输入到底是什么
 
-这和前面的 meta-action 数量是对齐的：
+从上一节过来，当前 decoupling 模式下已经有两支输入：
 
-- 7 个速度动作
-- 6 个路径动作
+- `current_states`: 速度轨迹分支当前状态，shape `(1, 1, hidden)`
+- `pw_current_states`: 路径轨迹分支当前状态，shape `(1, 1, hidden)`
 
-### 16.2 概率分布模块
+其中：
 
-先做：
+- 0.5B 时 `hidden = 896`
+- 3B 时 `hidden = 2048`
+
+对应代码：
+
+- `mmcv/models/detectors/minddrive.py:1035`
+- `mmcv/models/detectors/minddrive.py:1036`
+
+这里还有一个容易忽略的点：
+
+- `current_states` 是给分布模块用的“当前状态表示”
+- `hidden_states` 是给 GRU 当初始隐状态用的“当前隐藏状态表示”
+
+在当前实现里，它们的数值来源是同一个 token hidden state，只是后面被送到了不同模块。
+
+### 16.2 先看配置：这条解码器到底有多大
+
+在 `Minddrive.__init__()` 里，轨迹解码器相关超参数是：
+
+- `latent_dim = 32`
+- `layer_dim = 4`
+- `fut_ts = 6`
+- `fut_ps = 20`
+- `ego_fut_mode = 7`（use_meta_action=True 时）
+- `pw_ego_fut_mode = 6`
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:328`
+- `mmcv/models/detectors/minddrive.py:339`
+- `mmcv/models/detectors/minddrive.py:340`
+
+这几个数字后面会反复出现：
+
+- `32` 是 latent z 的维度
+- `4` 是 GRU 的层数
+- `6` 是速度轨迹时间步
+- `20` 是路径轨迹时间步
+- `7` 是速度模式数
+- `6` 是路径模式数
+
+### 16.3 第一步：`distribution_forward()` 用当前 hidden state 参数化高斯分布
+
+先执行：
 
 - `distribution_forward(current_states, ...)`
 - `pw_distribution_forward(pw_current_states, ...)`
 
-这里会从当前 hidden state 构造未来 latent sample。
+代码：
 
-虽然内部模块更复杂，但从接口理解可以记成：
+- `mmcv/models/detectors/minddrive.py:1047`
+- `mmcv/models/detectors/minddrive.py:1053`
+- `mmcv/models/detectors/minddrive.py:1965`
+- `mmcv/models/detectors/minddrive.py:2021`
 
-- 输入：`(1, 1, hidden)`
-- 输出：未来 latent sample，供后续时间展开使用
+#### 16.3.1 输入 shape
 
-### 16.3 时间展开
+对 0.5B 来说：
 
-接着：
+- `present_features = current_states = (1, 1, 896)`
+- `pw_present_features = pw_current_states = (1, 1, 896)`
 
-- `future_states_predict(...)`
-- `pw_future_states_predict(...)`
+对 3B 来说：
 
-会把“当前状态 + latent sample”展开成未来多个时间步的隐藏状态。
+- `(1, 1, 2048)`
 
-然后代码取：
+这里文档注释里还保留着旧的 5D 写法，但当前真实实现已经是 1D token 版，不是 BEV feature map 版。
+
+#### 16.3.2 `DistributionModule` 内部做了什么
+
+`DistributionModule` 定义在：
+
+- `mmcv/models/utils/distributions.py:9`
+
+它的结构是：
+
+```text
+输入 (B, 1, hidden)
+-> permute 成 (B, hidden, 1)
+-> 3 层 1x1 Conv1d
+-> AdaptiveAvgPool1d(1)
+-> Conv1d 输出 2 * latent_dim
+-> 切成 mu 和 log_sigma
+```
+
+代码：
+
+- `mmcv/models/utils/distributions.py:27`
+- `mmcv/models/utils/distributions.py:44`
+
+所以输出是：
+
+- `present_mu`: `(1, 1, 32)`
+- `present_log_sigma`: `(1, 1, 32)`
+
+路径分支同理：
+
+- `pw_present_mu`: `(1, 1, 32)`
+- `pw_present_log_sigma`: `(1, 1, 32)`
+
+#### 16.3.3 训练和推理的区别
+
+如果是训练：
+
+- 还会把 GT future trajectory 拼进来，构造 `future_distribution_inputs`
+- 再得到 `future_mu` 和 `future_log_sigma`
+- 训练时采样用的是 future posterior
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:641`
+- `mmcv/models/detectors/minddrive.py:648`
+- `mmcv/models/detectors/minddrive.py:1987`
+- `mmcv/models/detectors/minddrive.py:2001`
+
+如果是推理：
+
+- `future_distribution_inputs = None`
+- 没有 future posterior
+- 直接用 present prior 来采样
+
+所以闭环 benchmark 时真正发生的是：
+
+- 只根据当前 LLM hidden state 得到 `present_mu/log_sigma`
+- 然后采样一个 latent `z`
+
+#### 16.3.4 latent sample 的 shape
+
+采样代码是：
+
+```python
+sample = mu + sigma * noise
+sample = sample.permute(0, 2, 1).expand(b, self.latent_dim, c)
+```
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:2007`
+- `mmcv/models/detectors/minddrive.py:2010`
+
+由于当前 `present_features.shape[1] = 1`，所以这里最终得到：
+
+- `sample`: `(1, 32, 1)`
+
+路径分支同理：
+
+- `pw_sample`: `(1, 32, 1)`
+
+可以把它理解成：
+
+- 当前这帧，从 LLM 当前状态里抽出来的一个 32 维随机未来因子 `z`
+
+### 16.4 第二步：`future_states_predict()` 用 latent z 预测未来 hidden states
+
+接着执行：
+
+- `future_states_predict(B, sample, hidden_states, current_states)`
+- `pw_future_states_predict(B, pw_sample, pw_hidden_states, pw_current_states)`
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1061`
+- `mmcv/models/detectors/minddrive.py:1063`
+- `mmcv/models/detectors/minddrive.py:1846`
+- `mmcv/models/detectors/minddrive.py:1875`
+
+#### 16.4.1 先把 latent z 展成时间序列输入
+
+速度分支：
+
+```python
+future_prediction_input = sample.unsqueeze(0).expand(self.fut_ts, -1, -1, -1)
+future_prediction_input = future_prediction_input.reshape(self.fut_ts, -1, self.latent_dim)
+```
+
+所以：
+
+- 原始 `sample`: `(1, 32, 1)`
+- `unsqueeze + expand` 后：`(6, 1, 32, 1)`
+- `reshape` 后：`(6, 1, 32)`
+
+路径分支同理：
+
+- `pw_future_prediction_input`: `(20, 1, 32)`
+
+直观理解就是：
+
+- 把同一个 latent `z` 复制到未来每个时间步，作为 GRU 的输入序列
+
+#### 16.4.2 为什么 `hidden_states` 要 reshape 成 4 层 GRU 初始状态
+
+代码：
+
+```python
+hidden_states = hidden_states.permute(1, 0, 2)
+hidden_state = hidden_states.reshape(self.layer_dim, -1, hidden/4)
+```
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1853`
+- `mmcv/models/detectors/minddrive.py:1861`
+
+因为 `PredictModel` 里用的是：
+
+- `num_layers = layer_dim = 4`
+
+定义在：
+
+- `mmcv/models/utils/distributions.py:114`
+
+所以对 0.5B 来说：
+
+- 输入 `hidden_states`: `(1, 1, 896)`
+- `permute` 后：`(1, 1, 896)`
+- reshape 成 GRU 初始状态：`(4, 1, 224)`
+
+因为：
+
+- `896 / 4 = 224`
+
+对 3B 来说：
+
+- `(4, 1, 512)`
+
+因为：
+
+- `2048 / 4 = 512`
+
+这一步的本质是：
+
+- 把 LLM 当前 hidden state 拆成 4 份，分别当作 4 层 GRU 的初始隐状态
+
+#### 16.4.3 `PredictModel` 内部做了什么
+
+`PredictModel` 定义在：
+
+- `mmcv/models/utils/distributions.py:114`
+
+它的结构是：
+
+```text
+输入序列 (T, B, 32)
+-> 4 层 GRU
+-> Linear
+-> Linear
+-> Linear
+-> 输出每个未来时刻的 hidden feature
+```
+
+所以速度分支里：
+
+- 输入：`(6, 1, 32)`
+- 初始隐状态：`(4, 1, 224)`（0.5B）或 `(4, 1, 512)`（3B）
+- 输出 `future_states`: `(6, 1, 896)`（0.5B）或 `(6, 1, 2048)`（3B）
+
+路径分支里：
+
+- 输出 `pw_future_states`: `(20, 1, 896)` 或 `(20, 1, 2048)`
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1863`
+- `mmcv/models/detectors/minddrive.py:1892`
+
+### 16.5 第三步：把当前状态和未来状态拼起来
+
+代码：
+
+```python
+current_states_hs = current_states.unsqueeze(0).repeat(T, 1, 1, 1)
+future_states_hs = future_states.reshape(T, batch_size, -1, future_states.shape[2])
+states_hs = torch.cat((current_states_hs, future_states_hs), dim=-1)
+```
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:1865`
+- `mmcv/models/detectors/minddrive.py:1869`
+- `mmcv/models/detectors/minddrive.py:1894`
+- `mmcv/models/detectors/minddrive.py:1898`
+
+对于速度分支，0.5B 下：
+
+- `current_states_hs`: `(6, 1, 1, 896)`
+- `future_states_hs`: `(6, 1, 1, 896)`
+- 拼接后 `states_hs`: `(6, 1, 1, 1792)`
+
+对于路径分支，0.5B 下：
+
+- `pw_states_hs`: `(20, 1, 1, 1792)`
+
+3B 时最后一维对应变成：
+
+- `4096 = 2048 + 2048`
+
+这一步的含义是：
+
+- 每个未来时刻，不只看预测出来的未来 hidden feature
+- 还把“当前状态”一起拼进去
+- 所以后面的轨迹头每个时间步拿到的是“当前 + 未来”的联合表示
+
+### 16.6 第四步：整理成轨迹头能消费的格式
+
+接着代码取：
 
 ```python
 ego_query_hs = states_hs[:, :, 0, :].unsqueeze(1).permute(0, 2, 1, 3)
 pw_ego_query_hs = pw_states_hs[:, :, 0, :].unsqueeze(1).permute(0, 2, 1, 3)
 ```
 
-这一步之后可以把它理解成：
+代码：
 
-- `ego_query_hs`: 有 `6` 个时间步，每个时间步都带 1 个 batch、1 个 query、`2*hidden` 左右的特征
-- `pw_ego_query_hs`: 有 `20` 个时间步，结构类似
+- `mmcv/models/detectors/minddrive.py:1065`
+- `mmcv/models/detectors/minddrive.py:1068`
 
-### 16.4 速度轨迹分支
+对速度分支，0.5B 下：
 
-对每个未来时刻：
+- `states_hs[:, :, 0, :]`: `(6, 1, 1792)`
+- `unsqueeze(1)`: `(6, 1, 1, 1792)`
+- `permute(0, 2, 1, 3)`: `(6, 1, 1, 1792)`
+
+这里看起来形状没怎么变，但语义上已经统一成：
+
+- 第 0 维是 future timestep
+- 第 1 维是 query 维
+- 第 2 维是 batch
+- 第 3 维是 feature
+
+后面 `ego_fut_decoder(ego_query_hs[i])` 每次取的就是“第 i 个未来时刻的 query feature”。
+
+### 16.7 第五步：`ego_fut_decoder` / `pw_ego_fut_decoder` 变成候选轨迹增量
+
+先看速度分支的轨迹头定义：
 
 ```python
-outputs_ego_trajs = self.ego_fut_decoder(...).reshape(B, self.ego_fut_mode, 2)
+Linear(hidden*2, hidden*2)
+-> ReLU
+-> Linear(hidden*2, hidden*2)
+-> ReLU
+-> Linear(hidden*2, ego_fut_mode * 2)
 ```
+
+代码：
+
+- `mmcv/models/detectors/minddrive.py:365`
+- `mmcv/models/detectors/minddrive.py:370`
+
+0.5B 下就是：
+
+- `1792 -> 1792 -> 1792 -> 14`
 
 因为：
 
-- `B = 1`
-- `ego_fut_mode = 7`
+- `hidden*2 = 896 * 2 = 1792`
+- `ego_fut_mode * 2 = 7 * 2 = 14`
 
-所以单时刻输出：
+所以单个未来时刻：
+
+```python
+outputs_ego_trajs = self.ego_fut_decoder(ego_query_hs[i]).reshape(B, self.ego_fut_mode, 2)
+```
+
+会得到：
 
 - `(1, 7, 2)`
 
-堆 6 个时刻后：
-
-- `ego_fut_preds`: `(1, 7, 6, 2)`
-
-含义是：
+表示：
 
 - 1 个 batch
 - 7 种速度模式
-- 6 个未来时刻
-- 每步 2D 增量 `(dx, dy)`
+- 每种模式一个二维增量 `(dx, dy)`
 
-### 16.5 路径轨迹分支
+把 6 个时刻 stack 起来：
 
-类似地：
+- `ego_fut_preds`: `(1, 7, 6, 2)`
 
-```python
-pw_outputs_ego_trajs = self.pw_ego_fut_decoder(...).reshape(B, self.pw_ego_fut_mode, 2)
-```
+代码：
 
-因为：
+- `mmcv/models/detectors/minddrive.py:1071`
+- `mmcv/models/detectors/minddrive.py:1091`
 
-- `pw_ego_fut_mode = 6`
-- `fut_ps = 20`
+路径分支完全同理。
 
-所以最终：
+路径轨迹头定义在：
+
+- `mmcv/models/detectors/minddrive.py:397`
+- `mmcv/models/detectors/minddrive.py:403`
+
+0.5B 下单时刻输出：
+
+- `(1, 6, 2)`
+
+stack 20 个时刻后：
 
 - `pw_ego_fut_preds`: `(1, 6, 20, 2)`
 
-含义是：
+代码：
 
-- 1 个 batch
-- 6 种路径模式
-- 20 个未来点
-- 每步 2D 增量
+- `mmcv/models/detectors/minddrive.py:1076`
+- `mmcv/models/detectors/minddrive.py:1078`
 
----
+### 16.8 为什么这里输出的是“增量”而不是“绝对轨迹”
+
+这一层得到的 `ego_fut_preds` 和 `pw_ego_fut_preds` 还不是最终轨迹，而是每个时间步的二维位移增量。
+
+也就是说：
+
+- 第 1 步给出 `(dx1, dy1)`
+- 第 2 步给出 `(dx2, dy2)`
+- ...
+
+真正的绝对轨迹是在下一节通过：
+
+```python
+ego_fut_pred = ego_fut_preds.cumsum(dim=-2)
+pw_ego_fut_pred = pw_ego_fut_preds.cumsum(dim=-2)
+```
+
+才得到的。
+
+所以这一节结束时，最准确的说法是：
+
+- `decision_expert` 选速度模式
+- `action_expert + trajectory decoder` 产生所有候选 future displacement sequences
+- 下一节再从中选出当前模式并累加成最终轨迹
+
+### 16.9 一张更准确的 shape 链路图
+
+以 0.5B 速度分支为例：
+
+```text
+LLM token hidden state
+(1, 1, 896)
+
+-> DistributionModule
+mu/log_sigma: (1, 1, 32)
+
+-> sample z
+(1, 32, 1)
+
+-> expand over future time
+(6, 1, 32)
+
+-> GRU initial hidden from LLM state
+(4, 1, 224)
+
+-> PredictModel
+future_states: (6, 1, 896)
+
+-> concat current + future
+states_hs: (6, 1, 1, 1792)
+
+-> ego_fut_decoder per timestep
+(1, 7, 2)
+
+-> stack 6 timesteps
+ego_fut_preds: (1, 7, 6, 2)
+```
+
+路径分支同理，只是：
+
+- 时间步变成 `20`
+- 模式数变成 `6`
+- 输出变成 `(1, 6, 20, 2)`
 
 ## 17. 第 12 步：根据动作类别选出对应那一条轨迹
 
