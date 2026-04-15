@@ -26,7 +26,7 @@ def main():
     parser.add_argument("--require-runtime", action="store_true", help="Fail if CARLA runtime prerequisites are missing")
     args = parser.parse_args()
 
-    repo_root = pathlib.Path(__file__).resolve().parents[1]
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
     carla_root = pathlib.Path(os.environ.get("CARLA_ROOT", str(repo_root / "carla")))
     messages = []
     missing = []

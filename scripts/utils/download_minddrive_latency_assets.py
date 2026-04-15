@@ -6,7 +6,7 @@ from pathlib import Path
 from huggingface_hub import hf_hub_download, snapshot_download
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def parse_args():

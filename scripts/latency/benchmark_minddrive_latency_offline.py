@@ -19,7 +19,7 @@ except ImportError:
     torch_npu = None
 
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
+REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG = str(REPO_ROOT / "adzoo" / "minddrive" / "configs" / "minddrive_qwen2_05B_latency.py")
 DEFAULT_CKPT = str(REPO_ROOT / "ckpts" / "minddrive_rltrain.pth")
 DEFAULT_OUTPUT_NAME = "latency_offline_1280x704"

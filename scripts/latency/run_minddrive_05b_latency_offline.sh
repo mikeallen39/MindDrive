@@ -3,9 +3,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-source "${SCRIPT_DIR}/env_minddrive_b2d.sh"
+source "${ROOT_DIR}/scripts/env_minddrive_b2d.sh"
 
 export MINDDRIVE_ENABLE_LATENCY=1
 export MINDDRIVE_CAMERA_WIDTH="${MINDDRIVE_CAMERA_WIDTH:-1280}"
@@ -22,7 +22,7 @@ export MINDDRIVE_MAX_PATH_FDE="${MINDDRIVE_MAX_PATH_FDE:-25.0}"
 export MINDDRIVE_MAX_TRAJ_ABS_M="${MINDDRIVE_MAX_TRAJ_ABS_M:-150.0}"
 
 cmd=(
-  "${MINDDRIVE_PYTHON}" "${SCRIPT_DIR}/benchmark_minddrive_latency_offline.py"
+  "${MINDDRIVE_PYTHON}" "${ROOT_DIR}/scripts/latency/benchmark_minddrive_latency_offline.py"
   --config "${MINDDRIVE_CONFIG_PATH}"
   --checkpoint "${MINDDRIVE_CKPT_PATH}"
   --width "${MINDDRIVE_CAMERA_WIDTH}"

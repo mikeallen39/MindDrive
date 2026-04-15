@@ -3,7 +3,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BENCH_DIR="${ROOT_DIR}"
 
 MODEL_GPU="${1:-2}"
@@ -12,7 +12,7 @@ PORT="${3:-31000}"
 TM_PORT="${4:-51000}"
 CARLA_ADAPTER="${5:-3}"
 
-source "${SCRIPT_DIR}/env_minddrive_b2d.sh"
+source "${ROOT_DIR}/scripts/env_minddrive_b2d.sh"
 
 cd "${BENCH_DIR}"
 
@@ -51,7 +51,7 @@ export SAVE_PATH="${SAVE_PATH}"
 
 mkdir -p "$(dirname "${CHECKPOINT_ENDPOINT}")" "${SAVE_PATH}"
 
-"${MINDDRIVE_PYTHON}" "${SCRIPT_DIR}/check_minddrive_carla_env.py" --require-runtime
+"${MINDDRIVE_PYTHON}" "${ROOT_DIR}/scripts/utils/check_minddrive_carla_env.py" --require-runtime
 
 "${MINDDRIVE_PYTHON}" "${LEADERBOARD_ROOT}/leaderboard_evaluator.py" \
   --routes="${ROUTES}" \
