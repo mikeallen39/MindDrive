@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+EVAL_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(cd "${EVAL_SCRIPT_DIR}/../.." && pwd)"
 
 MODEL_GPU="${1:-2}"
 ROUTES_BASENAME="${2:-${BENCH2DRIVE_ROOT:-${ROOT_DIR}/Bench2Drive}/leaderboard/data/bench2drive220}"
@@ -30,14 +30,14 @@ fi
 
 CMD=(
   env "MINDDRIVE_STRICT_PORTS=${STRICT_PORTS}"
-  "${MINDDRIVE_PYTHON}" "${SCRIPT_DIR}/run_benchmark_supervisor.py"
-  --runner "${SCRIPT_DIR}/run_minddrive_05b_benchmark.sh"
+  "${MINDDRIVE_PYTHON}" "${EVAL_SCRIPT_DIR}/run_benchmark_supervisor.py"
+  --runner "${EVAL_SCRIPT_DIR}/run_minddrive_05b_benchmark.sh"
   --checkpoint "${CHECKPOINT_ABS}"
   --max-restarts "${MAX_RESTARTS}"
   --restart-delay "${RESTART_DELAY}"
   --max-stagnant-attempts "${MAX_STAGNANT_ATTEMPTS}"
-  --kill-pattern "-carla-rpc-port=${PORT}"
-  --kill-pattern "${EVALUATOR_PATTERN}"
+  "--kill-pattern=-carla-rpc-port=${PORT}"
+  "--kill-pattern=${EVALUATOR_PATTERN}"
 )
 
 if [[ -n "${SUPERVISOR_LOG}" ]]; then
